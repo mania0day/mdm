@@ -1,0 +1,21 @@
+# Node
+node_modules/
+*.log
+
+# Server data (SQLite)
+server/data/*.db
+server/data/*.db-shm
+server/data/*.db-wal
+server/.env
+
+# Dashboard build
+dashboard/dist/
+
+# Android
+android-agent/.gradle/
+android-agent/build/
+android-agent/app/build/
+android-agent/local.properties
+android-agent/.idea/
+*.iml
+.DS_Store

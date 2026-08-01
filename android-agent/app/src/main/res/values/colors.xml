@@ -1,0 +1,7 @@
+<resources>
+    <color name="brand">#1A45EB</color>
+    <color name="brand_dark">#0D1533</color>
+    <color name="slate_950">#0F172A</color>
+    <color name="slate_800">#1E293B</color>
+    <color name="white">#FFFFFF</color>
+</resources>

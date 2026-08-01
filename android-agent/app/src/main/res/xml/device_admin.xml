@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Device administration capabilities SENTROID requests. These map directly to
+     the remote actions in the proposal: remote lock, wipe/reset, password
+     policy enforcement, and camera control. -->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <limit-password />
+        <watch-login />
+        <reset-password />
+        <force-lock />
+        <wipe-data />
+        <expire-password />
+        <encrypted-storage />
+        <disable-camera />
+        <set-global-proxy />
+    </uses-policies>
+</device-admin>

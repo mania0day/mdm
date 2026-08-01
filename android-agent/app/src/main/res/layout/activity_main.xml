@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    android:background="#0F172A">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <ImageView
+            android:layout_width="72dp"
+            android:layout_height="72dp"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="16dp"
+            android:src="@drawable/ic_shield"
+            android:contentDescription="@string/app_name" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="8dp"
+            android:text="@string/app_name"
+            android:textColor="#FFFFFF"
+            android:textSize="26sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.1" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:text="Secure Remote Support Terminal · Agent"
+            android:textColor="#64748B"
+            android:textSize="13sp" />
+
+        <!-- Status card -->
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:background="#1E293B"
+            android:padding="16dp"
+            android:text="Not enrolled"
+            android:textColor="#E2E8F0"
+            android:textSize="14sp"
+            android:fontFamily="monospace" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="MDM Server URL"
+            android:textColor="#94A3B8"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/serverInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:background="#1E293B"
+            android:padding="14dp"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#475569"
+            android:hint="http://10.0.2.2:4000"
+            android:inputType="textUri"
+            android:importantForAutofill="no" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Enrollment Token"
+            android:textColor="#94A3B8"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/tokenInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:background="#1E293B"
+            android:padding="14dp"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#475569"
+            android:hint="ENR-xxxxxxxxxxxxxxxx"
+            android:inputType="textNoSuggestions"
+            android:importantForAutofill="no" />
+
+        <Button
+            android:id="@+id/adminButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:backgroundTint="#334155"
+            android:text="1 · Activate Device Administration"
+            android:textColor="#FFFFFF" />
+
+        <Button
+            android:id="@+id/enrollButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:backgroundTint="#1A45EB"
+            android:text="2 · Enroll Device"
+            android:textColor="#FFFFFF" />
+
+        <Button
+            android:id="@+id/checkinButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:backgroundTint="#334155"
+            android:text="Force Check-in Now"
+            android:textColor="#FFFFFF"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/unenrollButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:backgroundTint="#7F1D1D"
+            android:text="Unenroll (leave management)"
+            android:textColor="#FFFFFF"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/logText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:textColor="#64748B"
+            android:textSize="12sp"
+            android:fontFamily="monospace" />
+
+    </LinearLayout>
+</ScrollView>
