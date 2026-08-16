@@ -11,9 +11,14 @@ const FIELDS = [
   { key: 'max_failed_passwords', label: 'Wipe after N failed unlocks', type: 'number' },
   { key: 'max_screen_timeout_seconds', label: 'Max screen timeout (s)', type: 'number' },
   { key: 'disable_camera', label: 'Disable camera', type: 'bool' },
+  { key: 'disable_mic', label: 'Disable microphone', type: 'bool' },
   { key: 'require_encryption', label: 'Require storage encryption', type: 'bool' },
   { key: 'block_rooted', label: 'Flag rooted devices', type: 'bool' },
   { key: 'force_location_on', label: 'Force location always-on (block user)', type: 'bool' },
+  { key: 'force_airplane_mode_off', label: 'Block airplane mode (keep on network)', type: 'bool' },
+  { key: 'disallow_safe_boot', label: 'Block safe-mode reboot (Owner)', type: 'bool' },
+  { key: 'disallow_factory_reset', label: 'Block factory reset (Owner)', type: 'bool' },
+  { key: 'disallow_add_user', label: 'Block adding users / guests (Owner)', type: 'bool' },
 ];
 
 const listVariants = {
@@ -53,7 +58,7 @@ function PolicyEditor({ policy, onSave, onClose, canEdit }) {
         exit={{ opacity: 0, scale: 0.96 }}
         transition={{ duration: 0.22, ease: 'easeOut' }}
       >
-        <h2 className="font-display font-semibold text-brand-800 dark:text-slate-100 text-lg mb-4">
+        <h2 className="font-display font-semibold text-slate-900 dark:text-slate-100 text-lg mb-4">
           {policy ? 'Edit Policy' : 'New Policy'}
         </h2>
         <div className="space-y-4">
@@ -127,7 +132,7 @@ export default function Policies() {
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-bold text-brand-800 dark:text-slate-100">Security Policies</h1>
+          <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-slate-100">Security Policies</h1>
           <p className="text-sm text-slate-400 dark:text-slate-500">Rule-based enforcement pushed to managed devices</p>
         </div>
         {canEdit && (
@@ -146,13 +151,13 @@ export default function Policies() {
             key={p.id}
             className="card card-hover p-5"
             variants={itemVariants}
-            whileHover={{ y: -2 }}
+           
             transition={{ type: 'spring', stiffness: 300, damping: 24 }}
           >
             <div className="flex items-start justify-between">
               <div>
                 <div className="flex items-center gap-2">
-                  <h3 className="font-display font-semibold text-brand-800 dark:text-slate-100">{p.name}</h3>
+                  <h3 className="font-display font-semibold text-slate-900 dark:text-slate-100">{p.name}</h3>
                   {p.is_default ? <span className="badge bg-brand-50 text-brand-700 ring-1 ring-brand-600/20 dark:bg-brand-500/15 dark:text-brand-300 dark:ring-brand-400/25">default</span> : null}
                 </div>
                 <p className="text-sm text-slate-400 dark:text-slate-500 mt-0.5">{p.description}</p>
@@ -160,7 +165,7 @@ export default function Policies() {
               <span className="text-xs text-slate-500 dark:text-slate-400">{p.device_count} device(s)</span>
             </div>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1 mt-4 text-xs">
-              {Object.entries(p.config).slice(0, 8).map(([k, v]) => (
+              {Object.entries(p.config).map(([k, v]) => (
                 <div key={k} className="flex justify-between">
                   <span className="text-slate-500 dark:text-slate-400">{k.replace(/_/g, ' ')}</span>
                   <span className="text-slate-700 dark:text-slate-200 font-mono">{String(v)}</span>

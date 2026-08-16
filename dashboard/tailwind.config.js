@@ -5,19 +5,31 @@ export default {
   theme: {
     extend: {
       colors: {
-        // SENTROID — "Trust & Authority": security blue primary
+        // Override just the dark end of Tailwind's default `slate` scale —
+        // every page already uses dark:bg-slate-900 / dark:border-slate-800
+        // for cards/surfaces, so tuning these three shades fixes elevation
+        // and contrast app-wide without touching individual components.
+        // Default slate-900/800 (#0f172a / #1e293b) sit too close in
+        // luminance to read as distinct layers; this widens the gap
+        // (page < card < border), GitHub-dark-style.
+        slate: {
+          950: '#0a0d12',
+          900: '#161a21',
+          800: '#2a2f3a',
+        },
+        // SENTROID — modern indigo primary (security-grade trust, AI-console feel)
         brand: {
-          50: '#f0f9ff',
-          100: '#e0f2fe',
-          200: '#bae6fd',
-          300: '#7dd3fc',
-          400: '#38bdf8',
-          500: '#0ea5e9',
-          600: '#0369a1', // primary
-          700: '#075985',
-          800: '#0c4a6e',
-          900: '#082f49',
-          950: '#052338',
+          50: '#eef2ff',
+          100: '#e0e7ff',
+          200: '#c7d2fe',
+          300: '#a5b4fc',
+          400: '#818cf8',
+          500: '#6366f1',
+          600: '#4f46e5', // primary
+          700: '#4338ca',
+          800: '#372f9e',
+          900: '#312e81',
+          950: '#1e1b4b',
         },
         // Accent — "protected" green (CTA / success / online)
         accent: {
@@ -39,8 +51,10 @@ export default {
         },
       },
       fontFamily: {
+        // One typeface for the whole app — weight/size carries the hierarchy
+        // instead of mixing in a second "branded" display font.
         sans: ['"Source Sans 3"', 'system-ui', 'sans-serif'],
-        display: ['Lexend', 'system-ui', 'sans-serif'],
+        display: ['"Source Sans 3"', 'system-ui', 'sans-serif'],
         mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
       },
       boxShadow: {

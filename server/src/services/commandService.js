@@ -2,6 +2,7 @@ import { db } from '../db.js';
 import { COMMAND_TYPES, ROLES } from '../config.js';
 import { httpError } from '../middleware/error.js';
 import { audit } from '../utils/audit.js';
+import { notifyCommand } from './commandBus.js';
 
 const insertCommand = db.prepare(`
   INSERT INTO commands (device_id, type, payload, issued_by, status)
@@ -37,6 +38,10 @@ export function issueCommand({ device, type, payload = {}, user, ip }) {
   if (type === 'ENABLE') setDeviceStatus.run('active', device.id);
   if (type === 'LOCK') setDeviceStatus.run('locked', device.id);
   if (type === 'WIPE') setDeviceStatus.run('wipe_pending', device.id);
+
+  // Wake any check-in this device is currently long-polling, so the command is
+  // delivered in ~real time instead of on its next scheduled poll.
+  notifyCommand(device.id);
 
   audit({
     actorType: 'user',

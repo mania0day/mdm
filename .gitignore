@@ -2,14 +2,20 @@
 node_modules/
 *.log
 
-# Server data (SQLite)
+# Server data (SQLite) — runtime databases in any location
 server/data/*.db
 server/data/*.db-shm
 server/data/*.db-wal
+server/src/data/*.db
+server/src/data/*.db-shm
+server/src/data/*.db-wal
 server/.env
 
 # Dashboard build
 dashboard/dist/
+
+# start.sh runtime state (pid/log files)
+.run/
 
 # Android
 android-agent/.gradle/

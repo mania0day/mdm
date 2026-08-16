@@ -105,7 +105,8 @@ The device appears in the dashboard within ~10s. Issue **Lock / Wipe / Policy**
 commands from the device detail page and watch the agent execute them.
 
 Full step-by-step: **[docs/SETUP.md](docs/SETUP.md)** ·
-Demo script: **[docs/DEMO.md](docs/DEMO.md)**
+Demo script: **[docs/DEMO.md](docs/DEMO.md)** ·
+Production deployment (free cloud VM + VPN): **[docs/DEPLOY.md](docs/DEPLOY.md)**
 
 ## Security model (summary)
 

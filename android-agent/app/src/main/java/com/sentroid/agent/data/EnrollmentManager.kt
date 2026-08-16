@@ -25,10 +25,19 @@ object EnrollmentManager {
                 .put("os_version", DeviceInfo.osVersion())
                 .put("sdk_int", DeviceInfo.sdkInt())
                 .put("serial", DeviceInfo.serial())
+                .put("build_fingerprint", DeviceInfo.buildFingerprint())
+                .put("security_patch", DeviceInfo.securityPatch())
+                .put("management_mode", DeviceInfo.managementMode(context))
+                .put("is_rooted", DeviceInfo.isRooted(context))
+            DeviceInfo.imei(context)?.let { body.put("imei", it) }
+            DeviceInfo.phoneNumber(context)?.let { body.put("phone_number", it) }
+            DeviceInfo.simOperator(context)?.let { body.put("sim_operator", it) }
             val res = ApiClient(server).enroll(body)
             prefs.serverUrl = server
             prefs.deviceToken = res.getString("device_token")
             prefs.deviceId = res.getInt("device_id")
+            prefs.ownerName = res.optString("owner_name", "").ifBlank { null }
+            prefs.employeeId = res.optString("employee_id", "").ifBlank { null }
             res.optJSONObject("policy")?.optJSONObject("config")?.let {
                 prefs.lastPolicyJson = it.toString()
                 PolicyManager(context).applyPolicy(it)

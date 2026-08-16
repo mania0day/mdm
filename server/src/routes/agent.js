@@ -6,7 +6,14 @@ import { asyncHandler, httpError } from '../middleware/error.js';
 import { requireDevice } from '../middleware/auth.js';
 import { effectivePolicyForDevice, evaluateCompliance } from '../services/policyEngine.js';
 import { raiseAlert } from '../services/alertService.js';
+import { waitForCommand } from '../services/commandBus.js';
 import { audit } from '../utils/audit.js';
+
+// Upper bound on how long a check-in may be held open waiting for a command
+// (long-poll). The agent asks to hold only while its screen is on, so this adds
+// no idle-battery cost; it turns command latency from "up to one poll interval"
+// into "sub-second".
+const MAX_LONGPOLL_SECONDS = 30;
 
 export const agentRouter = Router();
 
@@ -16,10 +23,28 @@ const markTokenUsed = db.prepare(
 );
 const getDeviceByUid = db.prepare('SELECT * FROM devices WHERE device_uid = ?');
 const insertDevice = db.prepare(`
-  INSERT INTO devices (device_uid, device_token, name, owner_name, department,
-    manufacturer, model, os_version, sdk_int, serial, status, admin_active, last_seen, enrolled_at)
-  VALUES (@device_uid, @device_token, @name, @owner_name, @department,
-    @manufacturer, @model, @os_version, @sdk_int, @serial, 'active', 0, datetime('now'), datetime('now'))
+  INSERT INTO devices (device_uid, device_token, name, owner_name, department, employee_id,
+    manufacturer, model, os_version, sdk_int, serial, is_rooted, imei, phone_number,
+    sim_operator, build_fingerprint, security_patch, management_mode,
+    status, admin_active, last_seen, enrolled_at)
+  VALUES (@device_uid, @device_token, @name, @owner_name, @department, @employee_id,
+    @manufacturer, @model, @os_version, @sdk_int, @serial, @is_rooted, @imei, @phone_number,
+    @sim_operator, @build_fingerprint, @security_patch, @management_mode,
+    'active', 0, datetime('now'), datetime('now'))
+`);
+const updateScanOnReenroll = db.prepare(`
+  UPDATE devices SET device_token = ?,
+    status = CASE WHEN status IN ('wiped', 'unenrolled') THEN 'active' ELSE status END,
+    is_rooted = COALESCE(?, is_rooted),
+    imei = COALESCE(?, imei),
+    phone_number = COALESCE(?, phone_number),
+    sim_operator = COALESCE(?, sim_operator),
+    build_fingerprint = COALESCE(?, build_fingerprint),
+    security_patch = COALESCE(?, security_patch),
+    management_mode = COALESCE(?, management_mode),
+    employee_id = COALESCE(?, employee_id),
+    last_seen = datetime('now')
+  WHERE id = ?
 `);
 const getDefaultPolicyId = db.prepare('SELECT id FROM policies WHERE is_default = 1 LIMIT 1');
 const assignPolicy = db.prepare(
@@ -37,6 +62,13 @@ const enrollSchema = z.object({
   os_version: z.string().optional(),
   sdk_int: z.number().int().optional(),
   serial: z.string().optional(),
+  is_rooted: z.boolean().optional(),
+  imei: z.string().max(32).optional(),
+  phone_number: z.string().max(32).optional(),
+  sim_operator: z.string().max(64).optional(),
+  build_fingerprint: z.string().max(256).optional(),
+  security_patch: z.string().max(16).optional(),
+  management_mode: z.enum(['device_owner', 'device_admin', 'none']).optional(),
 });
 
 // POST /api/agent/enroll  -> secure device onboarding (Proposal 5.1)
@@ -55,10 +87,19 @@ agentRouter.post(
     const deviceToken = nanoid(40);
 
     if (device) {
-      db.prepare('UPDATE devices SET device_token = ?, status = CASE WHEN status = \'wiped\' THEN \'active\' ELSE status END, last_seen = datetime(\'now\') WHERE id = ?').run(
+      updateScanOnReenroll.run(
         deviceToken,
+        body.is_rooted === undefined ? null : body.is_rooted ? 1 : 0,
+        body.imei || null,
+        body.phone_number || null,
+        body.sim_operator || null,
+        body.build_fingerprint || null,
+        body.security_patch || null,
+        body.management_mode || null,
+        tokenRow.employee_id || null,
         device.id,
       );
+      device = db.prepare('SELECT * FROM devices WHERE id = ?').get(device.id);
     } else {
       if (tokenRow.used) throw httpError(401, 'Enrollment token already used');
       const info = insertDevice.run({
@@ -67,11 +108,21 @@ agentRouter.post(
         name: body.name || body.model || 'Android Device',
         owner_name: body.owner_name || tokenRow.label || null,
         department: body.department || tokenRow.department || null,
+        // Identity is set by the admin at token-issue time, not
+        // self-reported by the device — the token is the source of truth.
+        employee_id: tokenRow.employee_id || null,
         manufacturer: body.manufacturer || null,
         model: body.model || null,
         os_version: body.os_version || null,
         sdk_int: body.sdk_int || null,
         serial: body.serial || null,
+        is_rooted: body.is_rooted ? 1 : 0,
+        imei: body.imei || null,
+        phone_number: body.phone_number || null,
+        sim_operator: body.sim_operator || null,
+        build_fingerprint: body.build_fingerprint || null,
+        security_patch: body.security_patch || null,
+        management_mode: body.management_mode || 'none',
       });
       device = db.prepare('SELECT * FROM devices WHERE id = ?').get(info.lastInsertRowid);
       markTokenUsed.run(device.id, tokenRow.id);
@@ -99,11 +150,17 @@ agentRouter.post(
     res.status(201).json({
       device_id: device.id,
       device_token: deviceToken,
+      owner_name: device.owner_name,
+      employee_id: device.employee_id,
       policy: effectivePolicyForDevice(device.id),
       checkin_interval_seconds: 10,
     });
   }),
 );
+
+// How long a freshly-issued LOCK is allowed to be "in flight" before the
+// device's self-reported lock state is trusted over the command's status.
+const LOCK_SETTLE_GRACE_SECONDS = 120;
 
 const checkinSchema = z.object({
   battery_level: z.number().int().min(0).max(100).optional(),
@@ -116,6 +173,16 @@ const checkinSchema = z.object({
   is_rooted: z.boolean().optional(),
   latitude: z.number().optional(),
   longitude: z.number().optional(),
+  imei: z.string().max(32).optional(),
+  phone_number: z.string().max(32).optional(),
+  sim_operator: z.string().max(64).optional(),
+  build_fingerprint: z.string().max(256).optional(),
+  security_patch: z.string().max(16).optional(),
+  management_mode: z.enum(['device_owner', 'device_admin', 'none']).optional(),
+  device_locked: z.boolean().optional(),
+  // How many seconds the agent is willing to have this check-in held open waiting
+  // for a command (long-poll). 0 / absent = return immediately, as before.
+  wait: z.number().int().min(0).max(60).optional(),
 });
 
 // POST /api/agent/checkin  -> heartbeat + pull pending commands (Proposal 5.4 monitoring)
@@ -126,6 +193,50 @@ agentRouter.post(
     const device = req.device;
     const r = checkinSchema.parse(req.body || {});
     const verdict = evaluateCompliance(device, r);
+
+    // A check-in from a device the offline monitor had flagged means it is
+    // reachable again: clear the flag and log the recovery once (mirrors the
+    // monitor's one-shot "went offline").
+    if (device.offline_since) {
+      db.prepare('UPDATE devices SET offline_since = NULL WHERE id = ?').run(device.id);
+      audit({
+        actorType: 'device',
+        actorId: device.id,
+        actorLabel: device.name,
+        action: 'DEVICE_BACK_ONLINE',
+        targetType: 'device',
+        targetId: device.id,
+        details: { was_offline_since: device.offline_since },
+        ip: req.ip,
+      });
+      raiseAlert({
+        deviceId: device.id,
+        severity: 'info',
+        type: 'DEVICE_BACK_ONLINE',
+        message: `"${device.name}" is back online`,
+      });
+    }
+
+    // Detect the device having installed a real OS/security update between
+    // check-ins — `device` here still holds the pre-update row (requireDevice
+    // fetched it before this handler runs), so this is a straight before/after
+    // comparison, not a guess.
+    if (r.security_patch && device.security_patch && r.security_patch !== device.security_patch) {
+      raiseAlert({
+        deviceId: device.id,
+        severity: 'info',
+        type: 'DEVICE_UPDATED',
+        message: `"${device.name}" security patch changed ${device.security_patch} → ${r.security_patch}`,
+      });
+    }
+    if (r.os_version && device.os_version && r.os_version !== device.os_version) {
+      raiseAlert({
+        deviceId: device.id,
+        severity: 'info',
+        type: 'DEVICE_UPDATED',
+        message: `"${device.name}" Android version changed ${device.os_version} → ${r.os_version}`,
+      });
+    }
 
     db.prepare(
       `UPDATE devices SET last_seen = datetime('now'),
@@ -138,6 +249,12 @@ agentRouter.post(
          is_rooted = COALESCE(@is_rooted, is_rooted),
          latitude = COALESCE(@latitude, latitude),
          longitude = COALESCE(@longitude, longitude),
+         imei = COALESCE(@imei, imei),
+         phone_number = COALESCE(@phone_number, phone_number),
+         sim_operator = COALESCE(@sim_operator, sim_operator),
+         build_fingerprint = COALESCE(@build_fingerprint, build_fingerprint),
+         security_patch = COALESCE(@security_patch, security_patch),
+         management_mode = COALESCE(@management_mode, management_mode),
          compliance = @compliance
        WHERE id = @id`,
     ).run({
@@ -151,8 +268,67 @@ agentRouter.post(
       is_rooted: r.is_rooted === undefined ? null : r.is_rooted ? 1 : 0,
       latitude: r.latitude ?? null,
       longitude: r.longitude ?? null,
+      imei: r.imei || null,
+      phone_number: r.phone_number || null,
+      sim_operator: r.sim_operator || null,
+      build_fingerprint: r.build_fingerprint || null,
+      security_patch: r.security_patch || null,
+      management_mode: r.management_mode || null,
       compliance: verdict.status,
     });
+
+    // Reconcile commanded lock state against what the device actually reports.
+    // LOCK sets status='locked', but the user can unlock their own phone at any
+    // time and nothing else would ever clear it — leaving the console showing a
+    // lock that isn't real. 'disabled' is deliberately excluded: that is an
+    // administrative hold that only an explicit ENABLE may lift, and the agent
+    // re-locks the device on every check-in while it is in force.
+    if (r.device_locked === false && device.status === 'locked') {
+      // Only clear once no LOCK is still in flight. The very check-in that
+      // delivers a LOCK necessarily reports device_locked=false — the device
+      // has not run the command yet — so clearing unconditionally here would
+      // undo the lock's status the instant it was issued.
+      // Bounded by a grace window: a LOCK whose result never came back (the
+      // agent died, the network dropped) stays at 'sent' forever, and without
+      // the time bound that one stuck row would block this device's status
+      // from ever being corrected again.
+      const inFlight = db
+        .prepare(
+          `SELECT COUNT(*) c FROM commands
+           WHERE device_id = ? AND type = 'LOCK' AND status IN ('pending','sent')
+             AND (julianday('now') - julianday(issued_at)) * 86400 < ?`,
+        )
+        .get(device.id, LOCK_SETTLE_GRACE_SECONDS).c;
+      if (inFlight === 0) {
+        db.prepare("UPDATE devices SET status = 'active' WHERE id = ?").run(device.id);
+      }
+    }
+
+    // Fallback for device-admin removal. The agent posts /tamper on
+    // ADMIN_DISABLED, but that is a single best-effort network call made while
+    // the user is actively tearing the app down — if it fails, or the app is
+    // uninstalled before it retries, the console would keep showing the device
+    // as managed. A check-in that reports admin_active=false when we previously
+    // recorded it as true is the same fact arriving by a slower route.
+    if (device.admin_active === 1 && r.admin_active === false) {
+      db.prepare("UPDATE devices SET status = 'unenrolled' WHERE id = ?").run(device.id);
+      raiseAlert({
+        deviceId: device.id,
+        severity: 'critical',
+        type: 'ADMIN_DISABLED',
+        message: `"${device.name}" no longer reports device administrator rights — admin was removed on-device`,
+      });
+      audit({
+        actorType: 'device',
+        actorId: device.id,
+        actorLabel: device.name,
+        action: 'TAMPER_ADMIN_DISABLED',
+        targetType: 'device',
+        targetId: device.id,
+        details: { detected_via: 'checkin telemetry' },
+        ip: req.ip,
+      });
+    }
 
     if (!verdict.compliant) {
       raiseAlert({
@@ -171,10 +347,27 @@ agentRouter.post(
       });
     }
 
-    // Fetch and mark pending commands as sent.
-    const pending = db
-      .prepare(`SELECT * FROM commands WHERE device_id = ? AND status = 'pending' ORDER BY issued_at ASC`)
-      .all(device.id);
+    // Fetch pending commands. If none are queued and the device asked us to hold
+    // (it does while its screen is on), long-poll: wait until a command is issued
+    // — woken instantly by commandBus.notifyCommand() from issueCommand() — or
+    // until `wait` seconds pass, then re-check. This is what turns a click in the
+    // dashboard into a sub-second action on the device instead of a wait for its
+    // next scheduled poll.
+    const fetchPending = () =>
+      db
+        .prepare(`SELECT * FROM commands WHERE device_id = ? AND status = 'pending' ORDER BY issued_at ASC`)
+        .all(device.id);
+
+    let pending = fetchPending();
+    const wait = Math.min(r.wait ?? 0, MAX_LONGPOLL_SECONDS);
+    if (pending.length === 0 && wait > 0) {
+      const got = await waitForCommand(device.id, wait * 1000, res);
+      // Device gave up / disconnected while we held the request — the socket is
+      // gone, so there's nothing to reply to.
+      if (res.writableEnded || !res.writable) return;
+      if (got) pending = fetchPending();
+    }
+
     if (pending.length) {
       const ids = pending.map((c) => c.id);
       db.prepare(
@@ -190,8 +383,115 @@ agentRouter.post(
       })),
       policy: effectivePolicyForDevice(device.id).config,
       compliance: verdict.status,
+      // Sent so the agent can tell the user *why* it says "Needs attention"
+      // instead of showing an unexplained status.
+      violations: verdict.violations || [],
+      allow_reconfigure: !!device.allow_reconfigure,
       checkin_interval_seconds: 10,
     });
+  }),
+);
+
+// POST /api/agent/unenroll -> device-initiated departure from management.
+// Immediately revokes the device's bearer token (rotated to an unshared
+// value the agent never receives) so a copied/leaked token can't keep
+// checking in after the app says "unenrolled". The device row and its
+// history are kept for audit purposes; an admin can still see it was
+// self-unenrolled and re-enrollment issues a fresh token.
+agentRouter.post(
+  '/unenroll',
+  requireDevice,
+  asyncHandler(async (req, res) => {
+    const device = req.device;
+    db.prepare(`UPDATE devices SET device_token = ?, status = 'unenrolled' WHERE id = ?`).run(
+      nanoid(40),
+      device.id,
+    );
+    audit({
+      actorType: 'device',
+      actorId: device.id,
+      actorLabel: device.name,
+      action: 'DEVICE_UNENROLLED',
+      targetType: 'device',
+      targetId: device.id,
+      details: { uid: device.device_uid },
+      ip: req.ip,
+    });
+    raiseAlert({
+      deviceId: device.id,
+      severity: 'warning',
+      type: 'UNENROLLED',
+      message: `Device "${device.name}" left management (self-unenrolled)`,
+    });
+    res.json({ ok: true });
+  }),
+);
+
+const tamperSchema = z.object({
+  type: z.string().min(1).max(64),
+  message: z.string().min(1).max(500),
+});
+
+// POST /api/agent/tamper -> best-effort self-report fired from the device
+// admin receiver. Two events land here:
+//   ADMIN_DISABLE_REQUESTED — user opened the "deactivate admin" confirmation
+//     dialog. Fires early and reliably, but they might still cancel, so this
+//     is alert-only — it does not change the device's visible status.
+//   ADMIN_DISABLED — deactivation actually completed, which is also the
+//     mandatory first step before a non-Device-Owner install can be
+//     uninstalled. This one DOES flip the device to 'unenrolled' and revokes
+//     its token (same effect as /unenroll) so the dashboard immediately shows
+//     the device is gone instead of staying stuck on 'active' forever with
+//     the only evidence buried in the alerts list.
+agentRouter.post(
+  '/tamper',
+  requireDevice,
+  asyncHandler(async (req, res) => {
+    const device = req.device;
+    const { type, message } = tamperSchema.parse(req.body);
+
+    if (type === 'ADMIN_DISABLED') {
+      db.prepare(`UPDATE devices SET device_token = ?, status = 'unenrolled' WHERE id = ?`).run(
+        nanoid(40),
+        device.id,
+      );
+    }
+
+    audit({
+      actorType: 'device',
+      actorId: device.id,
+      actorLabel: device.name,
+      action: `TAMPER_${type}`,
+      targetType: 'device',
+      targetId: device.id,
+      details: { message },
+      ip: req.ip,
+    });
+    raiseAlert({
+      deviceId: device.id,
+      severity: 'critical',
+      type,
+      message: `"${device.name}": ${message}`,
+    });
+    res.json({ ok: true });
+  }),
+);
+
+const gameScoreSchema = z.object({
+  score: z.number().int().min(0).max(1_000_000),
+});
+
+// POST /api/agent/game-score -> sync the on-device dino-runner high score.
+// Only ever ratchets up — a lower score never overwrites a previously
+// synced best, same as the game's own local high score behaves.
+agentRouter.post(
+  '/game-score',
+  requireDevice,
+  asyncHandler(async (req, res) => {
+    const device = req.device;
+    const { score } = gameScoreSchema.parse(req.body);
+    db.prepare('UPDATE devices SET high_score = MAX(high_score, ?) WHERE id = ?').run(score, device.id);
+    res.json({ ok: true, high_score: Math.max(device.high_score || 0, score) });
   }),
 );
 

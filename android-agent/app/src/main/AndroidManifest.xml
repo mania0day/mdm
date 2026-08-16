@@ -12,6 +12,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Fleet inventory scan (build/serial/IMEI-if-owner/phone number best-effort) -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <!-- 24/7 tracking: the agent must read location while running in the background -->
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.VIBRATE" />
@@ -36,6 +38,12 @@
             </intent-filter>
         </activity>
 
+        <!-- Dino-runner mini-game — a bit of fun while waiting on a check-in cycle -->
+        <activity
+            android:name=".game.GameActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
         <!-- Device Admin receiver: grants remote lock / wipe / policy control -->
         <receiver
             android:name=".admin.SentroidDeviceAdminReceiver"
@@ -47,6 +55,10 @@
             <intent-filter>
                 <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
                 <action android:name="android.app.action.DEVICE_ADMIN_DISABLE_REQUESTED" />
+                <!-- Fired when admin is actually turned off (the mandatory first
+                     step before uninstall). Declared explicitly so onDisabled()
+                     reliably dispatches its tamper report on every OEM ROM. -->
+                <action android:name="android.app.action.DEVICE_ADMIN_DISABLED" />
                 <action android:name="android.app.action.ACTION_PASSWORD_FAILED" />
             </intent-filter>
         </receiver>

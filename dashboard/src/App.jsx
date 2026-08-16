@@ -6,11 +6,13 @@ import Login from './pages/Login.jsx';
 import Overview from './pages/Overview.jsx';
 import Devices from './pages/Devices.jsx';
 import DeviceDetail from './pages/DeviceDetail.jsx';
+import DeviceReport from './pages/DeviceReport.jsx';
 import Policies from './pages/Policies.jsx';
 import Alerts from './pages/Alerts.jsx';
 import AuditLogs from './pages/AuditLogs.jsx';
 import Enrollment from './pages/Enrollment.jsx';
 import Users from './pages/Users.jsx';
+import Manual from './pages/Manual.jsx';
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
@@ -34,11 +36,13 @@ export default function App() {
         <Route index element={<Overview />} />
         <Route path="devices" element={<Devices />} />
         <Route path="devices/:id" element={<DeviceDetail />} />
+        <Route path="devices/:id/report" element={<DeviceReport />} />
         <Route path="policies" element={<Policies />} />
         <Route path="alerts" element={<Alerts />} />
         <Route path="audit" element={<AuditLogs />} />
         <Route path="enrollment" element={<Enrollment />} />
         <Route path="users" element={<Users />} />
+        <Route path="manual" element={<Manual />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

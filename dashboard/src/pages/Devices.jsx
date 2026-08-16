@@ -1,21 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { motion } from 'framer-motion';
 import { api } from '../api';
-import { Spinner, StatusBadge, ComplianceBadge, OnlineDot, timeAgo, EmptyState } from '../ui.jsx';
-
-const container = {
-  hidden: {},
-  show: { transition: { staggerChildren: 0.04 } },
-};
-
-const item = {
-  hidden: { opacity: 0, y: 10 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.35, ease: 'easeOut' } },
-};
+import { Spinner, StatusDot, ComplianceDot, OnlineDot, timeAgo, EmptyState } from '../ui.jsx';
 
 export default function Devices() {
   const [devices, setDevices] = useState(null);
+  const [alertCounts, setAlertCounts] = useState({});
   const [q, setQ] = useState('');
   const navigate = useNavigate();
 
@@ -27,6 +17,34 @@ export default function Devices() {
     return () => {
       live = false;
       clearInterval(t);
+    };
+  }, []);
+
+  // Per-device unseen-alert counts drive the badge on each row — this is the
+  // only place alert counts surface now (no more global sidebar badge).
+  // Opening a device's detail page acks its alerts, so this count drops back
+  // to 0 as soon as the operator has actually seen them.
+  useEffect(() => {
+    let live = true;
+    const poll = () =>
+      api
+        .get('/alerts')
+        .then((d) => {
+          if (!live) return;
+          const counts = {};
+          for (const a of d.alerts) {
+            if (a.device_id && !a.acknowledged) counts[a.device_id] = (counts[a.device_id] || 0) + 1;
+          }
+          setAlertCounts(counts);
+        })
+        .catch(() => {});
+    poll();
+    const t = setInterval(poll, 8000);
+    window.addEventListener('sentroid:alerts-changed', poll);
+    return () => {
+      live = false;
+      clearInterval(t);
+      window.removeEventListener('sentroid:alerts-changed', poll);
     };
   }, []);
 
@@ -44,7 +62,7 @@ export default function Devices() {
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-bold text-brand-800 dark:text-slate-100">Devices</h1>
+          <h1 className="font-display text-2xl font-bold text-slate-900 dark:text-slate-100">Devices</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">{devices.length} enrolled device(s)</p>
         </div>
         <input
@@ -69,26 +87,36 @@ export default function Devices() {
                 <th className="th">Last Seen</th>
               </tr>
             </thead>
-            <motion.tbody variants={container} initial="hidden" animate="show">
+            <tbody>
               {filtered.map((d) => (
-                <motion.tr
+                <tr
                   key={d.id}
-                  variants={item}
-                  whileHover={{ backgroundColor: 'rgb(248 250 252)' }}
-                  transition={{ duration: 0.3, ease: 'easeOut' }}
-                  className="cursor-pointer border-t border-slate-100 dark:border-slate-800"
+                  className="cursor-pointer border-t border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors"
                   onClick={() => navigate(`/devices/${d.id}`)}
                 >
                   <td className="td">
-                    <div className="font-medium text-slate-800 dark:text-slate-100">{d.name}</div>
+                    <div className="font-medium text-slate-800 dark:text-slate-100 flex items-center gap-1.5">
+                      {d.name}
+                      {d.is_rooted ? (
+                        <span title="Rooted — compromised integrity" className="text-red-600 dark:text-red-400">⚠</span>
+                      ) : null}
+                      {alertCounts[d.id] ? (
+                        <span
+                          title={`${alertCounts[d.id]} unseen alert(s)`}
+                          className="badge bg-red-100 text-red-700 ring-1 ring-red-600/20 dark:bg-red-500/15 dark:text-red-300 dark:ring-red-400/25"
+                        >
+                          {alertCounts[d.id]}
+                        </span>
+                      ) : null}
+                    </div>
                     <div className="text-xs text-slate-500 dark:text-slate-400 font-mono">{d.model || d.device_uid}</div>
                   </td>
                   <td className="td">
                     <div className="text-slate-800 dark:text-slate-100">{d.owner_name || '—'}</div>
                     <div className="text-xs text-slate-500 dark:text-slate-400">{d.department || ''}</div>
                   </td>
-                  <td className="td"><StatusBadge status={d.status} /></td>
-                  <td className="td"><ComplianceBadge value={d.compliance} /></td>
+                  <td className="td"><StatusDot status={d.status} /></td>
+                  <td className="td"><ComplianceDot value={d.compliance} /></td>
                   <td className="td">
                     {d.battery_level != null ? (
                       <span className={d.battery_level <= 15 ? 'text-red-700 dark:text-red-300' : 'text-slate-800 dark:text-slate-100'}>
@@ -103,9 +131,9 @@ export default function Devices() {
                     <OnlineDot online={d.online} />
                     <div className="text-xs text-slate-400 dark:text-slate-500">{timeAgo(d.last_seen)}</div>
                   </td>
-                </motion.tr>
+                </tr>
               ))}
-            </motion.tbody>
+            </tbody>
           </table>
         ) : (
           <EmptyState>

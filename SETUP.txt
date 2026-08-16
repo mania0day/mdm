@@ -1,0 +1,181 @@
+================================================================================
+ SENTROID MDM  —  SETUP & RUN GUIDE
+ Method A: install the agent + make it DEVICE OWNER via ADB (recommended for a
+ single test phone). Everything below is copy-paste ready.
+================================================================================
+
+VALUES FOR THIS MACHINE (change only if your network/paths differ)
+------------------------------------------------------------------
+  PC LAN IP        : 192.168.1.11        (re-check any time with:  hostname -I)
+  Server URL       : http://192.168.1.11:4000
+  Admin login      : admin / Admin@123
+  App package      : com.sentroid.agent
+  Admin receiver   : com.sentroid.agent/.admin.SentroidDeviceAdminReceiver
+
+PROJECT PATHS
+-------------
+  Server           : /home/mania/Documents/MDM_PROJECT/server
+  Dashboard        : /home/mania/Documents/MDM_PROJECT/dashboard
+  Agent (Android)  : /home/mania/Documents/MDM_PROJECT/android-agent
+  Built APK        : /home/mania/Documents/MDM_PROJECT/apk/sentroid-agent.apk
+
+
+================================================================================
+ 0)  PREREQUISITES  (already installed on this machine)
+================================================================================
+  node -v          # expect v18+ (have v24)
+  adb version      # expect it prints a version (have /usr/bin/adb)
+
+  Building the APK needs JDK 17-21. The system default Java is 25, which the
+  Android build CANNOT use. The build script (build-apk.sh) auto-selects the
+  Android Studio JDK at /opt/android-studio/jbr, so just use it — see step 2.
+
+
+================================================================================
+ 1)  START THE SERVER
+================================================================================
+  cd /home/mania/Documents/MDM_PROJECT/server
+  npm install
+  npm start
+
+  Leave this terminal running. It listens on http://0.0.0.0:4000 and prints:
+      Admin login     : admin / Admin@123
+      Demo enroll tok : ENR-xxxxxxxx      <-- copy this token (used in step 3.7)
+
+  (Run once) build the dashboard so the server serves it at :4000 :
+      cd /home/mania/Documents/MDM_PROJECT/dashboard
+      npm install
+      npm run build
+
+  Then open the dashboard in a browser at:
+      http://192.168.1.11:4000
+  Use the LAN IP (not localhost) so the in-dashboard QR uses a phone-reachable URL.
+
+
+================================================================================
+ 2)  BUILD THE AGENT APK   (skip if apk/sentroid-agent.apk already exists)
+================================================================================
+  cd /home/mania/Documents/MDM_PROJECT/android-agent
+  ./build-apk.sh
+  # Output -> /home/mania/Documents/MDM_PROJECT/apk/sentroid-agent.apk
+  # (Also writes apk/sentroid-agent.apk.checksum for QR provisioning.)
+
+
+================================================================================
+ 3)  METHOD A — INSTALL + SET DEVICE OWNER  (ADB, over USB)
+================================================================================
+
+ 3.1  FACTORY RESET the phone.
+      During the setup wizard: DO NOT sign in to Google and SKIP adding any
+      account. (Device Owner can only be set when the device has ZERO accounts.)
+      Finish setup to the home screen.
+
+ 3.2  Enable Developer Options + USB debugging on the phone:
+        Settings > About phone > tap "Build number" 7 times
+        Settings > System > Developer options > turn ON "USB debugging"
+      Plug the phone into this PC by USB. Tap "Allow" on the USB-debugging prompt.
+
+ 3.3  Confirm the phone is connected:
+        adb devices
+      It must show your device as "device" (not "unauthorized" / not empty).
+
+ 3.4  Install the agent APK:
+        adb install -r /home/mania/Documents/MDM_PROJECT/apk/sentroid-agent.apk
+
+ 3.5  Make the app DEVICE OWNER:
+        adb shell dpm set-device-owner com.sentroid.agent/.admin.SentroidDeviceAdminReceiver
+      Expected output:
+        Success: Device owner set to package com.sentroid.agent
+
+ 3.6  Point the phone at the server — pick ONE:
+
+      OPTION 1 — phone on the SAME Wi-Fi as this PC (normal case):
+        Open the SENTROID app, set Server URL:
+            http://192.168.1.11:4000
+
+      OPTION 2 — USB only (no shared Wi-Fi): bridge the port over USB, then use
+      localhost from the phone:
+        adb reverse tcp:4000 tcp:4000
+        Then in the app set Server URL:
+            http://127.0.0.1:4000
+
+ 3.7  Enroll the device:
+      In the app, enter an enrollment token:
+        - the "Demo enroll tok" printed by the server in step 1, OR
+        - Dashboard > Enrollment > Generate (copy the ENR-... token).
+      Tap enroll. The device appears in Dashboard > Devices as device_owner.
+
+
+================================================================================
+ 4)  CONFIRM IT WORKED
+================================================================================
+  - Dashboard > Devices: the phone is online and shows management_mode=device_owner.
+  - Confirm owner status over adb:
+        adb shell dumpsys device_policy | grep -i "Device Owner"
+  - Send a command (Lock / Ping / Locate) with the phone SCREEN ON -> it lands in
+    ~1 second (fast long-poll mode is active while the screen is on).
+  - Owner lockdown is enforced: try Safe-Mode reboot / factory reset in Settings
+    -> both are blocked.
+
+
+================================================================================
+ 5)  COMMON ERRORS
+================================================================================
+  "Not allowed to set the device owner because there are already some accounts"
+      -> An account was added during setup. Factory reset again and SKIP all
+         Google/account sign-in steps, then redo step 3.
+
+  "adb: device unauthorized"  (or adb devices shows nothing)
+      -> Approve the RSA/"Allow USB debugging" prompt on the phone.
+         Re-plug USB and run:  adb devices
+
+  "java.lang.IllegalStateException: Trying to set the device owner, but device
+   owner is already set." / "...device is already provisioned"
+      -> The device already has an owner or completed setup differently.
+         Factory reset and retry on a clean device.
+
+  APK build fails with a cryptic  "25.0.4"
+      -> That's system Java 25. ALWAYS build via  ./build-apk.sh  (it forces
+         JDK 21). Do not run gradle directly with the system Java.
+
+  App can't reach the server
+      -> Same Wi-Fi? Use http://192.168.1.11:4000 . USB only? Use
+         'adb reverse tcp:4000 tcp:4000' and http://127.0.0.1:4000 .
+         Check the PC firewall isn't blocking port 4000.
+
+  Commands feel slow
+      -> They're instant with the screen ON. With the screen OFF the phone polls
+         on a battery-saving schedule (up to ~15s); just wake the phone.
+
+
+================================================================================
+ 6)  REMOVE / RE-TEST  (a Device Owner CANNOT be uninstalled normally)
+================================================================================
+  To fully remove the agent you must factory reset the device:
+    - Dashboard > send WIPE   (the owner app factory-resets the phone), OR
+    - Recovery wipe:  adb reboot recovery   then wipe data from recovery.
+  NOTE: with the lockdown policy ON, the in-Settings factory reset is blocked on
+  purpose — use the Dashboard WIPE or recovery instead (both still work).
+
+
+================================================================================
+ USEFUL ADB COMMANDS  (copy-paste)
+================================================================================
+  adb devices                                            # list connected devices
+  adb install -r /home/mania/Documents/MDM_PROJECT/apk/sentroid-agent.apk   # (re)install
+  adb shell dpm set-device-owner com.sentroid.agent/.admin.SentroidDeviceAdminReceiver
+  adb shell dumpsys device_policy | grep -i "Device Owner"   # confirm owner
+  adb reverse tcp:4000 tcp:4000                          # phone localhost -> PC:4000
+  adb logcat | grep -i sentroid                          # live agent logs
+  adb uninstall com.sentroid.agent                       # remove (only if NOT owner)
+  hostname -I                                             # find this PC's LAN IP
+
+
+================================================================================
+ NOTE — Method B (QR / no cable) exists too
+================================================================================
+  Dashboard > Enrollment > "Provision (QR)" shows a QR a freshly-wiped phone can
+  scan (tap the first welcome screen 6 times -> connect Wi-Fi -> scan) to become
+  Device Owner and auto-enroll with no cable. It needs the phone's Wi-Fi to reach
+  this server at the LAN IP (http://192.168.1.11:4000), not localhost.
+================================================================================

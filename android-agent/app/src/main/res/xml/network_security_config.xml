@@ -1,11 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Permit cleartext HTTP only to the local/self-hosted MDM server used for
-     development and emulator testing (10.0.2.2 is the host loopback from the
-     emulator). Production deployments should serve the API over HTTPS/TLS. -->
+<!--
+  Network policy for the SENTROID agent.
+
+  The agent is pointed at a self-hosted MDM server whose address is entered by
+  the operator at enrollment time — it may be a LAN address (192.168.x.x during
+  a lab/demo deployment), a tunnel hostname, or a real HTTPS domain. Because the
+  host is not known at build time, the base config permits cleartext so an
+  on-premise HTTP server on any address is reachable.
+
+  IMPORTANT: a <domain-config> block does NOT extend the manifest's
+  android:usesCleartextTraffic — once a network security config is present, the
+  base config governs every host not explicitly listed, and its default on
+  targetSdk 28+ is cleartext-denied. That is why the base-config below is
+  required for LAN addresses to work at all.
+
+  HTTPS is still used whenever the server URL is https:// — and user-installed
+  CAs are trusted so a self-signed lab certificate or a corporate root can be
+  provisioned onto the device without rebuilding the APK.
+-->
 <network-security-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">10.0.2.2</domain>
-        <domain includeSubdomains="true">localhost</domain>
-        <domain includeSubdomains="true">127.0.0.1</domain>
-    </domain-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
 </network-security-config>

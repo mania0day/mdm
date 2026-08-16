@@ -18,16 +18,6 @@ const ROLE_BADGE = {
   auditor: 'bg-slate-100 text-slate-500 dark:bg-slate-700/50 dark:text-slate-300',
 };
 
-const tableVariants = {
-  hidden: {},
-  show: { transition: { staggerChildren: 0.05 } },
-};
-
-const rowVariants = {
-  hidden: { opacity: 0, y: 8 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.3, ease: 'easeOut' } },
-};
-
 export default function Users() {
   const { user } = useAuth();
   const isSuper = hasRole(user, 'super_admin');
@@ -66,7 +56,7 @@ export default function Users() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.3, ease: 'easeOut' }}
       >
-        <h1 className="text-2xl font-display font-bold text-brand-800 dark:text-slate-100">Administrators</h1>
+        <h1 className="text-2xl font-display font-bold text-slate-900 dark:text-slate-100">Administrators</h1>
         <p className="text-sm text-slate-500 dark:text-slate-400">Role-based access control for the MDM console</p>
       </motion.div>
 
@@ -77,7 +67,7 @@ export default function Users() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.35, ease: 'easeOut' }}
         >
-          <h2 className="font-display font-semibold text-brand-800 dark:text-slate-100 mb-3">Add Administrator</h2>
+          <h2 className="font-display font-semibold text-slate-900 dark:text-slate-100 mb-3">Add Administrator</h2>
           <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
             <div>
               <label className="label">Username</label>
@@ -115,13 +105,11 @@ export default function Users() {
               {isSuper && <th className="th"></th>}
             </tr>
           </thead>
-          <motion.tbody variants={tableVariants} initial="hidden" animate="show">
+          <tbody>
             {users.map((u) => (
-              <motion.tr
+              <tr
                 key={u.id}
-                variants={rowVariants}
-                whileHover={{ backgroundColor: 'rgb(248 250 252)' }}
-                className="border-t border-slate-100 dark:border-slate-800"
+                className="border-t border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors"
               >
                 <td className="td">
                   <div className="flex items-center gap-3">
@@ -160,9 +148,9 @@ export default function Users() {
                     )}
                   </td>
                 )}
-              </motion.tr>
+              </tr>
             ))}
-          </motion.tbody>
+          </tbody>
         </table>
       </div>
     </div>

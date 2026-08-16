@@ -146,12 +146,12 @@ export default function Login() {
             <div className="grid h-14 w-14 place-items-center rounded-xl bg-brand-600 text-white shadow-md">
               <Shield className="h-8 w-8" />
             </div>
-            <div className="mt-3 text-xl font-bold tracking-tight text-brand-800 dark:text-slate-100 font-display">SENTROID</div>
+            <div className="mt-3 text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100 font-display">SENTROID</div>
           </div>
 
           <div className="card p-8">
             <div className="mb-6">
-              <h2 className="text-xl font-bold text-brand-800 dark:text-slate-100 font-display">Administrator Access</h2>
+              <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100 font-display">Administrator Access</h2>
               <p className="text-sm text-slate-500 dark:text-slate-400 flex items-center gap-2 mt-1.5">
                 <span className="h-1.5 w-1.5 rounded-full bg-accent-500 pulse-dot" />
                 Authenticate to enter the console
@@ -197,7 +197,7 @@ export default function Login() {
                 disabled={busy}
                 whileHover={{ scale: 1.01 }}
                 whileTap={{ scale: 0.98 }}
-                className="w-full rounded-lg bg-brand-600 hover:bg-brand-700 py-3 font-semibold text-white shadow-[0_8px_24px_-10px_rgba(3,105,161,0.6)] disabled:opacity-70 transition-colors"
+                className="w-full rounded-lg bg-brand-600 hover:bg-brand-700 py-3 font-semibold text-white shadow-[0_8px_24px_-10px_rgba(79, 70, 229,0.6)] disabled:opacity-70 transition-colors"
               >
                 <span className="flex items-center justify-center gap-2">
                   {busy ? (

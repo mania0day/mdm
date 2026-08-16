@@ -11,7 +11,10 @@ data class CheckinResult(
     val commands: List<CommandDto>,
     val policy: JSONObject?,
     val compliance: String,
+    /** Human-readable reasons the device is non-compliant, for display in-app. */
+    val violations: List<String>,
     val intervalSeconds: Int,
+    val allowReconfigure: Boolean,
 )
 
 data class CommandDto(val id: Int, val type: String, val payload: JSONObject)
@@ -28,8 +31,16 @@ class ApiClient(private val baseUrl: String, private val deviceToken: String? = 
     fun enroll(body: JSONObject): JSONObject =
         post("/api/agent/enroll", body, auth = false)
 
-    fun checkin(body: JSONObject): CheckinResult {
-        val res = post("/api/agent/checkin", body, auth = true)
+    /**
+     * @param holdSeconds how long the server may hold this request open waiting
+     *   for a command (long-poll). 0 = return immediately (battery-friendly idle
+     *   polling). When > 0 the read timeout is extended past the server's hold so
+     *   the connection isn't torn down a moment before the server replies.
+     */
+    fun checkin(body: JSONObject, holdSeconds: Int = 0): CheckinResult {
+        if (holdSeconds > 0) body.put("wait", holdSeconds)
+        val readTimeout = if (holdSeconds > 0) holdSeconds * 1000 + 15000 else 15000
+        val res = post("/api/agent/checkin", body, auth = true, readTimeoutMs = readTimeout)
         val cmdArr: JSONArray = res.optJSONArray("commands") ?: JSONArray()
         val commands = ArrayList<CommandDto>()
         for (i in 0 until cmdArr.length()) {
@@ -42,11 +53,23 @@ class ApiClient(private val baseUrl: String, private val deviceToken: String? = 
                 ),
             )
         }
+        val vioArr = res.optJSONArray("violations") ?: JSONArray()
+        val violations = ArrayList<String>()
+        for (i in 0 until vioArr.length()) vioArr.optString(i)?.takeIf { it.isNotBlank() }?.let { violations.add(it) }
+
+        // optString() returns the literal string "null" when the JSON value is
+        // an explicit null (it stringifies the NULL sentinel rather than falling
+        // back), which would otherwise surface in the UI as "Status: null".
+        val compliance = res.optString("compliance", "unknown")
+            .takeIf { it.isNotBlank() && it != "null" } ?: "unknown"
+
         return CheckinResult(
             commands = commands,
             policy = res.optJSONObject("policy"),
-            compliance = res.optString("compliance", "unknown"),
+            compliance = compliance,
+            violations = violations,
             intervalSeconds = res.optInt("checkin_interval_seconds", 10),
+            allowReconfigure = res.optBoolean("allow_reconfigure", false),
         )
     }
 
@@ -55,13 +78,41 @@ class ApiClient(private val baseUrl: String, private val deviceToken: String? = 
         post("/api/agent/commands/$commandId/result", body, auth = true)
     }
 
-    private fun post(path: String, body: JSONObject, auth: Boolean): JSONObject {
+    /** Tell the server this device is leaving management; revokes its token server-side. */
+    fun unenroll() {
+        post("/api/agent/unenroll", JSONObject(), auth = true)
+    }
+
+    /** Best-effort tamper/self-report (e.g. device administration was just deactivated). */
+    fun reportTamper(type: String, message: String) {
+        val body = JSONObject().put("type", type).put("message", message)
+        // Short timeouts on purpose: this is called from a BroadcastReceiver's
+        // goAsync() window (onDisabled / onDisableRequested) during app teardown,
+        // which the OS caps at ~10s before it may reap the process. A quick single
+        // attempt (≤8s worst case) that fits inside that budget lands the report
+        // far more reliably than the default 15s+15s call, which can be killed
+        // mid-request on exactly the slow/offline network this path targets.
+        post("/api/agent/tamper", body, auth = true, connectTimeoutMs = 4000, readTimeoutMs = 4000)
+    }
+
+    /** Sync a dino-runner score; the server keeps only the best one seen. */
+    fun submitGameScore(score: Int) {
+        post("/api/agent/game-score", JSONObject().put("score", score), auth = true)
+    }
+
+    private fun post(
+        path: String,
+        body: JSONObject,
+        auth: Boolean,
+        connectTimeoutMs: Int = 15000,
+        readTimeoutMs: Int = 15000,
+    ): JSONObject {
         val url = URL(baseUrl.trimEnd('/') + path)
         val conn = url.openConnection() as HttpURLConnection
         try {
             conn.requestMethod = "POST"
-            conn.connectTimeout = 15000
-            conn.readTimeout = 15000
+            conn.connectTimeout = connectTimeoutMs
+            conn.readTimeout = readTimeoutMs
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
             if (auth && deviceToken != null) {

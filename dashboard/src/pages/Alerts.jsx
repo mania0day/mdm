@@ -1,115 +1,143 @@
-import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { motion } from 'framer-motion';
+import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../api';
-import { Spinner, SeverityBadge, timeAgo, EmptyState } from '../ui.jsx';
+import { Spinner, SeverityBadge, timeAgo, EmptyState, notifyAlertsChanged } from '../ui.jsx';
 
-const listVariants = {
-  hidden: {},
-  show: { transition: { staggerChildren: 0.04 } },
-};
+const REFRESH_MS = 8000;
 
-const itemVariants = {
-  hidden: { opacity: 0, y: 10 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.25, ease: 'easeOut' } },
-};
+// "See all" first, then one tab per severity. Counts are filled in from the
+// loaded alerts so each tab shows how many it holds.
+const TABS = [
+  { key: 'all', label: 'See all' },
+  { key: 'critical', label: 'Critical' },
+  { key: 'warning', label: 'Warning' },
+  { key: 'info', label: 'Info' },
+];
 
 export default function Alerts() {
-  const [data, setData] = useState(null);
+  const [params, setParams] = useSearchParams();
+  const deviceId = params.get('device');
+  const [alerts, setAlerts] = useState(null);
+  const [tab, setTab] = useState('all');
 
-  const load = () => api.get('/alerts').then(setData).catch(() => {});
+  // Load alerts — fleet-wide, or scoped to one device via ?device=.
   useEffect(() => {
+    let live = true;
+    const qs = deviceId ? `?device_id=${deviceId}` : '';
+    const load = () =>
+      api.get(`/alerts${qs}`).then((d) => live && setAlerts(d.alerts)).catch(() => {});
     load();
-    const t = setInterval(load, 8000);
-    return () => clearInterval(t);
-  }, []);
+    const t = setInterval(load, REFRESH_MS);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [deviceId]);
 
-  async function ack(id) {
-    await api.post(`/alerts/${id}/ack`);
-    load();
-  }
-  async function ackAll() {
-    await api.post('/alerts/ack-all');
-    load();
-  }
+  // Opening this page marks everything shown as seen, so the sidebar's "new
+  // alerts" badge resets to 0 (same pattern DeviceDetail already uses). Alerts
+  // that arrive afterwards are unacknowledged again and re-raise the badge.
+  useEffect(() => {
+    const qs = deviceId ? `?device_id=${deviceId}` : '';
+    api.post(`/alerts/ack-all${qs}`).then(() => notifyAlertsChanged()).catch(() => {});
+  }, [deviceId]);
 
-  if (!data) return <Spinner />;
+  const counts = useMemo(() => {
+    const c = { all: 0, critical: 0, warning: 0, info: 0 };
+    (alerts || []).forEach((a) => {
+      c.all += 1;
+      if (c[a.severity] != null) c[a.severity] += 1;
+    });
+    return c;
+  }, [alerts]);
 
-  const accentFor = (a) => {
-    if (a.acknowledged) return 'border-l-4 border-transparent';
-    if (a.severity === 'critical') return 'border-l-4 border-red-500';
-    if (a.severity === 'warning') return 'border-l-4 border-amber-400';
-    return 'border-l-4 border-brand-400';
-  };
+  const shown = (alerts || []).filter((a) => tab === 'all' || a.severity === tab);
+  const deviceName = deviceId && alerts && alerts.find((a) => a.device_name)?.device_name;
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="font-display text-2xl font-bold text-brand-800 dark:text-slate-100">Alerts</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">{data.unacknowledged} unacknowledged</p>
-        </div>
-        {data.unacknowledged > 0 && (
-          <button className="btn-accent" onClick={ackAll}>Acknowledge all</button>
+      <div>
+        {deviceId ? (
+          <>
+            <button
+              onClick={() => setParams({})}
+              className="text-xs text-brand-600 dark:text-brand-300 hover:text-brand-800 mb-1"
+            >
+              ← All alerts
+            </button>
+            <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+              {deviceName || 'Device'} — Alerts
+            </h1>
+          </>
+        ) : (
+          <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">Alerts</h1>
         )}
+        <p className="text-sm text-slate-500 dark:text-slate-400">
+          Monitoring events across the fleet — newest first
+        </p>
+      </div>
+
+      {/* Severity tabs */}
+      <div className="inline-flex flex-wrap gap-0.5 rounded-lg border border-slate-200 dark:border-slate-700 p-0.5 bg-white dark:bg-slate-900">
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={`px-3.5 py-1.5 text-sm rounded-md inline-flex items-center gap-2 transition-colors ${
+              tab === t.key
+                ? 'bg-brand-600 text-white'
+                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            {t.label}
+            <span
+              className={`text-xs rounded-full px-1.5 py-0.5 tabular-nums ${
+                tab === t.key ? 'bg-white/20' : 'bg-slate-100 dark:bg-slate-800'
+              }`}
+            >
+              {counts[t.key] || 0}
+            </span>
+          </button>
+        ))}
       </div>
 
       <div className="card overflow-hidden">
-        {data.alerts.length ? (
+        {!alerts ? (
+          <Spinner />
+        ) : shown.length ? (
           <table className="w-full">
             <thead>
-              <tr>
+              <tr className="bg-slate-50 dark:bg-slate-800/60">
                 <th className="th">Severity</th>
+                {!deviceId && <th className="th">Device</th>}
                 <th className="th">Type</th>
                 <th className="th">Message</th>
-                <th className="th">Device</th>
                 <th className="th">When</th>
-                <th className="th"></th>
               </tr>
             </thead>
-            <motion.tbody variants={listVariants} initial="hidden" animate="show">
-              {data.alerts.map((a) => {
-                const criticalUnack = !a.acknowledged && a.severity === 'critical';
-                return (
-                  <motion.tr
-                    key={a.id}
-                    variants={itemVariants}
-                    className={`${accentFor(a)} ${a.acknowledged ? 'opacity-50' : ''}`}
-                  >
-                    <td className="td">
-                      <div className="flex items-center gap-2">
-                        {criticalUnack && (
-                          <motion.span
-                            className="inline-block h-2 w-2 rounded-full bg-red-500"
-                            animate={{ opacity: [1, 0.4, 1] }}
-                            transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut' }}
-                          />
-                        )}
-                        <SeverityBadge severity={a.severity} />
-                      </div>
-                    </td>
-                    <td className="td font-mono text-xs text-slate-500 dark:text-slate-400">{a.type}</td>
-                    <td className="td text-slate-800 dark:text-slate-100">{a.message}</td>
-                    <td className="td">
-                      {a.device_id ? (
-                        <Link to={`/devices/${a.device_id}`} className="text-brand-600 hover:text-brand-700 dark:text-brand-300 dark:hover:text-brand-300">
-                          {a.device_name || `#${a.device_id}`}
-                        </Link>
-                      ) : '—'}
-                    </td>
-                    <td className="td text-slate-500 dark:text-slate-400">{timeAgo(a.created_at)}</td>
-                    <td className="td text-right">
-                      {!a.acknowledged && (
-                        <button className="btn-ghost text-xs" onClick={() => ack(a.id)}>Ack</button>
-                      )}
-                    </td>
-                  </motion.tr>
-                );
-              })}
-            </motion.tbody>
+            <tbody>
+              {shown.map((a) => (
+                <tr
+                  key={a.id}
+                  className="border-t border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                >
+                  <td className="td"><SeverityBadge severity={a.severity} /></td>
+                  {!deviceId && (
+                    <td className="td text-slate-700 dark:text-slate-200">{a.device_name || '—'}</td>
+                  )}
+                  <td className="td font-mono text-xs text-slate-500 dark:text-slate-400">{a.type}</td>
+                  <td className="td text-slate-800 dark:text-slate-100">{a.message}</td>
+                  <td className="td text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                    {timeAgo(a.created_at)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
           </table>
         ) : (
-          <EmptyState>No alerts. All clear.</EmptyState>
+          <EmptyState>
+            No {tab === 'all' ? '' : `${tab} `}alerts{deviceId ? ' for this device' : ''}.
+          </EmptyState>
         )}
       </div>
     </div>

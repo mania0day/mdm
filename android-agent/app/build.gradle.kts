@@ -8,22 +8,26 @@ android {
     compileSdk = 34
 
     defaultConfig {
+        // Supported range: Android 10 (API 29) through Android 16. minSdk 29
+        // sets the floor; the app runs forward-compatibly on Android 16 at
+        // targetSdk 34 (bumping to API 36 would require an AGP/Gradle upgrade
+        // and the API 36 platform, which this toolchain doesn't carry).
         applicationId = "com.sentroid.agent"
-        minSdk = 24
+        minSdk = 29
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 6
+        versionName = "1.5"
 
         // Default MDM server base URL. 10.0.2.2 is the host loopback as seen
         // from inside the Android emulator. Editable at runtime in the app.
         buildConfigField("String", "DEFAULT_SERVER", "\"http://10.0.2.2:4000\"")
 
         // Optional device-identity override for testing/demo on an emulator that
-        // stands in for a specific target handset. Leave both empty ("") to report
-        // the device's real hardware (the correct behaviour for production builds).
-        // Set here so this test build represents the organization's Redmi Note 9.
-        buildConfigField("String", "DEVICE_MANUFACTURER_OVERRIDE", "\"Xiaomi\"")
-        buildConfigField("String", "DEVICE_MODEL_OVERRIDE", "\"Redmi Note 9\"")
+        // stands in for a specific target handset. Left empty so every build
+        // reports the device's real hardware — required for a fleet of
+        // different physical devices to show correctly in the console.
+        buildConfigField("String", "DEVICE_MANUFACTURER_OVERRIDE", "\"\"")
+        buildConfigField("String", "DEVICE_MODEL_OVERRIDE", "\"\"")
     }
 
     buildFeatures {

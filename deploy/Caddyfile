@@ -1,0 +1,45 @@
+## SENTROID reverse proxy — public agent surface, VPN-only admin surface.
+##
+## Threat model: Android agents check in from arbitrary networks (cellular
+## data, hotel wifi, etc.) so /api/agent/* MUST be reachable from the public
+## internet — it is protected by per-device bearer tokens + rate limiting at
+## the Node layer. Everything else (the admin dashboard SPA and every other
+## /api/* route) is administrative surface with no reason to face the public
+## internet, so it is additionally restricted to the Tailscale mesh
+## (100.64.0.0/10) here, on top of the existing JWT auth. Defense in depth:
+## a stolen/forged admin JWT is still useless to someone outside the VPN.
+##
+## Set SENTROID_DOMAIN before starting Caddy, e.g. a free DuckDNS hostname
+## pointed at this VM's static public IP (see docs/DEPLOY.md).
+
+{$SENTROID_DOMAIN} {
+	encode gzip
+
+	handle /api/agent/* {
+		reverse_proxy 127.0.0.1:4000
+	}
+
+	handle /api/health {
+		reverse_proxy 127.0.0.1:4000
+	}
+
+	# Optional: public download path for the signed release APK, used by the
+	# QR zero-touch provisioning flow (tools/generate-provisioning-qr.py).
+	handle /agent/* {
+		root * /opt/sentroid/releases
+		file_server
+	}
+
+	# Default: the dashboard SPA + every remaining /api/* admin route.
+	handle {
+		@notTailscale not remote_ip 100.64.0.0/10
+		respond @notTailscale "Access restricted to the admin VPN. Join Tailscale and retry." 403
+
+		reverse_proxy 127.0.0.1:4000
+	}
+
+	log {
+		output file /var/log/caddy/sentroid-access.log
+		format json
+	}
+}

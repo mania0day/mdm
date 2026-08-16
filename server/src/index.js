@@ -19,6 +19,7 @@ import { auditRouter } from './routes/audit.js';
 import { usersRouter } from './routes/users.js';
 import { enrollmentRouter } from './routes/enrollment.js';
 import { statsRouter } from './routes/stats.js';
+import { startOfflineMonitor } from './services/offlineMonitor.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,7 +37,10 @@ app.use(
         defaultSrc: ["'self'"],
         scriptSrc: ["'self'"],
         styleSrc: ["'self'", "'unsafe-inline'"],
-        imgSrc: ["'self'", 'data:'],
+        // CARTO basemap raster tiles for the device location map (OSM's own
+        // tile server blocks embedded use). Tiles are <img> requests, so only
+        // img-src needs the tile host.
+        imgSrc: ["'self'", 'data:', 'https://*.basemaps.cartocdn.com'],
         connectSrc: ["'self'"],
         // Local demo is served over plain HTTP; do not force-upgrade sub-resource
         // requests to HTTPS (that would break asset loading on http://localhost).
@@ -70,6 +74,19 @@ app.use('/api/users', usersRouter);
 app.use('/api/enrollment', enrollmentRouter);
 app.use('/api/stats', statsRouter);
 
+// Serve the agent APK at a stable path for QR / zero-touch Device Owner
+// provisioning downloads. Served from the apk/ folder (not dashboard/dist,
+// which the Vite build wipes on every rebuild).
+const apkPath = path.join(__dirname, '..', '..', 'apk', 'sentroid-agent.apk');
+app.get('/sentroid-agent.apk', (req, res) => {
+  if (fs.existsSync(apkPath)) {
+    res.type('application/vnd.android.package-archive');
+    res.sendFile(apkPath);
+  } else {
+    res.status(404).json({ error: 'APK not built yet — run android-agent/build-apk.sh' });
+  }
+});
+
 // Serve the built dashboard (if present) as static SPA.
 const dashboardDist = path.join(__dirname, '..', '..', 'dashboard', 'dist');
 if (fs.existsSync(dashboardDist)) {
@@ -88,6 +105,10 @@ if (fs.existsSync(dashboardDist)) {
 }
 
 app.use(errorHandler);
+
+// Background watchdog: log + alert when a managed device goes silent (the only
+// server-observable signal that the agent was uninstalled / device powered off).
+startOfflineMonitor();
 
 app.listen(config.port, config.host, () => {
   /* eslint-disable no-console */

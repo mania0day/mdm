@@ -18,77 +18,62 @@ body,
 body {
   @apply text-slate-700 font-sans antialiased;
   font-family: '"Source Sans 3"', 'Source Sans 3', system-ui, sans-serif;
-  background: #eef4fa;
+  background: #f7f8fa;
 }
 .dark body {
-  @apply text-slate-300;
-  background: #0a1120;
+  @apply text-slate-200;
+  background: #0a0d12;
 }
 
-/* Soft enterprise canvas backdrop for the app shell (very subtle, no neon). */
+/* Flat, plain canvas — no decorative gradients. */
 .bg-app {
-  background:
-    radial-gradient(1100px 600px at 85% -8%, rgba(3, 105, 161, 0.06), transparent 60%),
-    radial-gradient(900px 520px at -5% 108%, rgba(22, 163, 74, 0.05), transparent 55%),
-    linear-gradient(180deg, #f3f8fc 0%, #eef4fa 100%);
+  background: #f7f8fa;
 }
 .dark .bg-app {
-  background:
-    radial-gradient(1100px 600px at 85% -8%, rgba(56, 189, 248, 0.10), transparent 60%),
-    radial-gradient(900px 520px at -5% 108%, rgba(34, 197, 94, 0.07), transparent 55%),
-    linear-gradient(180deg, #0b1324 0%, #0a1120 100%);
-}
-
-h1, h2, h3, h4, .font-display {
-  font-family: 'Lexend', system-ui, sans-serif;
+  background: #0a0d12;
 }
 
 @layer components {
   /* Clean white surface card with a soft blue-tinted shadow. */
   .card {
-    @apply rounded-xl bg-white border border-slate-200/80;
-    box-shadow: 0 1px 2px rgba(12, 74, 110, 0.04), 0 4px 16px -6px rgba(12, 74, 110, 0.10);
-    transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+    @apply rounded-lg bg-white border border-slate-200 shadow-sm;
+    transition: border-color 0.15s ease;
   }
   .card-hover:hover {
-    border-color: rgba(3, 105, 161, 0.30);
-    box-shadow: 0 2px 4px rgba(3, 105, 161, 0.06), 0 12px 28px -10px rgba(3, 105, 161, 0.20);
+    @apply border-slate-300;
   }
 
   .btn {
-    @apply inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-lg text-sm font-medium
-           transition-all focus:outline-none focus:ring-2 focus:ring-brand-600/40 disabled:opacity-50
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold
+           min-h-[40px] transition-colors focus:outline-none focus:ring-2 focus:ring-brand-600/40 disabled:opacity-50
            disabled:cursor-not-allowed cursor-pointer;
   }
   .btn-primary {
     @apply btn text-white bg-brand-600 hover:bg-brand-700;
-    box-shadow: 0 6px 16px -8px rgba(3, 105, 161, 0.55);
   }
   .btn-accent {
     @apply btn text-white bg-accent-600 hover:bg-accent-700;
-    box-shadow: 0 6px 16px -8px rgba(22, 163, 74, 0.5);
   }
   .btn-danger {
     @apply btn text-white bg-red-600 hover:bg-red-700;
-    box-shadow: 0 6px 16px -8px rgba(220, 38, 38, 0.45);
   }
   .btn-ghost {
-    @apply btn text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 hover:border-brand-300;
+    @apply btn text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300;
   }
 
   .input {
-    @apply w-full rounded-lg px-3 py-2 text-sm text-slate-800 bg-white border border-slate-300
-           transition-all placeholder:text-slate-400;
+    @apply w-full rounded-lg px-3.5 py-2.5 text-sm text-slate-800 bg-white border border-slate-300
+           min-h-[40px] transition-all placeholder:text-slate-400;
   }
   .input:focus {
     @apply outline-none border-brand-600;
-    box-shadow: 0 0 0 3px rgba(3, 105, 161, 0.18);
+    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.18);
   }
   .label {
     @apply block text-xs font-medium text-slate-500 mb-1;
   }
   .badge {
-    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium;
+    @apply inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold;
   }
   .th {
     @apply text-left text-xs font-semibold uppercase tracking-wider text-slate-500 px-4 py-3;
@@ -98,18 +83,16 @@ h1, h2, h3, h4, .font-display {
   }
   /* Section heading helper */
   .h-page {
-    @apply text-2xl font-bold text-brand-800 font-display tracking-tight;
+    @apply text-2xl font-bold text-slate-900 tracking-tight;
   }
 }
 
 /* ---- Dark-mode overrides for shared component classes ---- */
 .dark .card {
-  @apply bg-slate-900 border-slate-800;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.6);
+  @apply bg-slate-900 border-slate-800 shadow-none;
 }
 .dark .card-hover:hover {
-  border-color: rgba(56, 189, 248, 0.35);
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4), 0 14px 30px -12px rgba(0, 0, 0, 0.7);
+  @apply border-slate-700;
 }
 .dark .btn-ghost {
   @apply text-slate-200 bg-slate-800 border-slate-700 hover:bg-slate-700 hover:border-brand-500;
@@ -119,7 +102,7 @@ h1, h2, h3, h4, .font-display {
 }
 .dark .input:focus {
   @apply border-brand-400;
-  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.25);
+  box-shadow: 0 0 0 3px rgba(129, 140, 248, 0.25);
 }
 .dark .label { @apply text-slate-400; }
 .dark .th { @apply text-slate-400; }
@@ -152,3 +135,69 @@ h1, h2, h3, h4, .font-display {
 *::-webkit-scrollbar { width: 8px; height: 8px; }
 *::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 8px; }
 *::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+/* ---- PDF export (browser print-to-PDF of a report page) ----
+   Elements marked .no-print (sidebar, header, action buttons) vanish;
+   .print-only elements (the report letterhead) appear only in the printed
+   output; report content is forced to light, static, single-column so
+   charts/tables read correctly on paper regardless of the live theme. */
+.print-only { display: none; }
+@media print {
+  @page { margin: 14mm 12mm; }
+  html, body, #root { height: auto; background: #fff !important; }
+  body { color: #1e293b !important; }
+  .no-print { display: none !important; }
+  .print-only { display: block; }
+  .print-area {
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+  .print-area * {
+    color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .card {
+    background: #fff !important;
+    border: 1px solid #cbd5e1 !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+  }
+  .dark .card,
+  .dark .td,
+  .dark .th,
+  .dark .h-page {
+    background: #fff !important;
+    color: #1e293b !important;
+    border-color: #cbd5e1 !important;
+  }
+  section, .card { page-break-inside: avoid; }
+}
+
+/* ---- Location map (Leaflet) ------------------------------------------------
+   A grid background shows through when OSM tiles can't load (offline / hotspot),
+   so the panel still reads as a map with the marker on it. */
+.location-map,
+.location-map-empty {
+  background-color: #eaf0f6;
+  background-image:
+    linear-gradient(to right, rgba(100, 116, 139, 0.12) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(100, 116, 139, 0.12) 1px, transparent 1px);
+  background-size: 26px 26px;
+}
+.dark .location-map,
+.dark .location-map-empty {
+  background-color: #0f172a;
+  background-image:
+    linear-gradient(to right, rgba(148, 163, 184, 0.1) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148, 163, 184, 0.1) 1px, transparent 1px);
+}
+/* Let the grid show through where tiles are missing, and match app typography.
+   Dark/light basemap styling comes from CARTO's native dark_all/light_all tiles
+   (see LocationMap.jsx), so no CSS tile filter is needed. */
+.leaflet-container {
+  background: transparent;
+  font: inherit;
+}

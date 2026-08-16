@@ -27,10 +27,13 @@ object CheckinScheduler {
         return PendingIntent.getBroadcast(context, REQ, i, flags)
     }
 
-    /** Schedule the next check-in ~[seconds] from now (clamped to a sane range). */
+    /** Schedule the next check-in ~[seconds] from now (clamped to a sane range).
+     *  Floor is 1s so the screen-on long-poll can reopen almost immediately; the
+     *  battery-friendly idle cadence uses much larger values, and Doze batches the
+     *  inexact alarm regardless when the device is actually idle. */
     fun scheduleNext(context: Context, seconds: Int) {
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val triggerAt = System.currentTimeMillis() + seconds.coerceIn(15, 3600) * 1000L
+        val triggerAt = System.currentTimeMillis() + seconds.coerceIn(1, 3600) * 1000L
         try {
             am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent(context))
         } catch (e: Exception) {

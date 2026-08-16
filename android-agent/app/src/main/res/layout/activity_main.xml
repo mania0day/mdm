@@ -1,143 +1,269 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:fillViewport="true"
-    android:background="#0F172A">
+    android:background="@color/bg_canvas">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="24dp">
+        android:padding="20dp">
 
-        <ImageView
-            android:layout_width="72dp"
-            android:layout_height="72dp"
-            android:layout_gravity="center_horizontal"
-            android:layout_marginTop="16dp"
-            android:src="@drawable/ic_shield"
-            android:contentDescription="@string/app_name" />
+        <!-- Header -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingTop="8dp"
+            android:paddingBottom="20dp">
 
+            <com.google.android.material.card.MaterialCardView
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                app:cardBackgroundColor="@color/brand"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="0dp">
+
+                <ImageView
+                    android:layout_width="26dp"
+                    android:layout_height="26dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_shield"
+                    android:contentDescription="@string/app_name" />
+            </com.google.android.material.card.MaterialCardView>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="12dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/app_name"
+                    android:textColor="@color/text_primary"
+                    android:textSize="20sp"
+                    android:textStyle="bold"
+                    android:letterSpacing="0.02" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Secure Device Agent"
+                    android:textColor="@color/text_muted"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Identity card: the ONLY thing an enrolled device shows day-to-day —
+             the assigned employee's name and a plain-language status. No device
+             internals (UID, serial, IMEI, management mode, etc.) are surfaced
+             here; that detail lives in the admin console, not on the handset. -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/identityCard"
+            style="@style/Sentroid.Card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="14dp"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:gravity="center_horizontal"
+                android:paddingVertical="8dp">
+
+                <TextView
+                    android:id="@+id/identityName"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Enrolled Device"
+                    android:textColor="@color/text_primary"
+                    android:textSize="20sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/identityStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="Status: enrolled"
+                    android:textColor="@color/accent"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Technical status card — setup/troubleshooting only, hidden once enrolled -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/techStatusCard"
+            style="@style/Sentroid.Card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="14dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="DEVICE STATUS &amp; POLICY"
+                    android:textColor="@color/text_muted"
+                    android:textSize="11sp"
+                    android:textStyle="bold"
+                    android:letterSpacing="0.08"
+                    android:layout_marginBottom="10dp" />
+
+                <!-- Populated programmatically in MainActivity.refreshStatus() as
+                     structured label/value rows instead of a monospace text dump. -->
+                <LinearLayout
+                    android:id="@+id/statusRows"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Setup card -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/setupCard"
+            style="@style/Sentroid.Card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="14dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="ENROLLMENT SETUP"
+                    android:textColor="@color/text_muted"
+                    android:textSize="11sp"
+                    android:textStyle="bold"
+                    android:letterSpacing="0.08"
+                    android:layout_marginBottom="12dp" />
+
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Sentroid.TextInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="MDM server URL">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/serverInput"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="textUri"
+                        android:textColor="@color/text_primary"
+                        android:importantForAutofill="no" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Sentroid.TextInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:hint="Enrollment token">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/tokenInput"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="textNoSuggestions"
+                        android:textColor="@color/text_primary"
+                        android:importantForAutofill="no" />
+                </com.google.android.material.textfield.TextInputLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Primary actions (setup only) -->
+        <LinearLayout
+            android:id="@+id/setupActionsGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/adminButton"
+                style="@style/Sentroid.Button.Outlined"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="1 · Activate Device Administration" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/enrollButton"
+                style="@style/Sentroid.Button.Primary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="2 · Enroll Device" />
+        </LinearLayout>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/checkinButton"
+            style="@style/Sentroid.Button.Outlined"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="Force Check-in Now"
+            android:visibility="gone" />
+
+        <!-- Managed-device notice: this is a monitoring endpoint, not a
+             self-service control surface. Enrollment/removal is an
+             administrator action from the console, by design. -->
         <TextView
+            android:id="@+id/managedNotice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:gravity="center_horizontal"
+            android:text="This device is under organizational management. Contact your administrator to make changes."
+            android:textColor="@color/text_muted"
+            android:textSize="11sp"
+            android:paddingHorizontal="12dp"
+            android:visibility="gone" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/reconfigureButton"
+            style="@style/Sentroid.Button.Text"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="center_horizontal"
             android:layout_marginTop="8dp"
-            android:text="@string/app_name"
-            android:textColor="#FFFFFF"
-            android:textSize="26sp"
-            android:textStyle="bold"
-            android:letterSpacing="0.1" />
+            android:textColor="@color/text_muted"
+            android:text="IT setup / re-configure"
+            android:visibility="gone" />
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:text="Secure Remote Support Terminal · Agent"
-            android:textColor="#64748B"
-            android:textSize="13sp" />
-
-        <!-- Status card -->
-        <TextView
-            android:id="@+id/statusText"
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/playGameButton"
+            style="@style/Sentroid.Button.Outlined"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:background="#1E293B"
-            android:padding="16dp"
-            android:text="Not enrolled"
-            android:textColor="#E2E8F0"
-            android:textSize="14sp"
-            android:fontFamily="monospace" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:text="MDM Server URL"
-            android:textColor="#94A3B8"
-            android:textSize="12sp" />
-
-        <EditText
-            android:id="@+id/serverInput"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:background="#1E293B"
-            android:padding="14dp"
-            android:textColor="#FFFFFF"
-            android:textColorHint="#475569"
-            android:hint="http://10.0.2.2:4000"
-            android:inputType="textUri"
-            android:importantForAutofill="no" />
-
-        <TextView
-            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="Enrollment Token"
-            android:textColor="#94A3B8"
-            android:textSize="12sp" />
-
-        <EditText
-            android:id="@+id/tokenInput"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:background="#1E293B"
-            android:padding="14dp"
-            android:textColor="#FFFFFF"
-            android:textColorHint="#475569"
-            android:hint="ENR-xxxxxxxxxxxxxxxx"
-            android:inputType="textNoSuggestions"
-            android:importantForAutofill="no" />
-
-        <Button
-            android:id="@+id/adminButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:backgroundTint="#334155"
-            android:text="1 · Activate Device Administration"
-            android:textColor="#FFFFFF" />
-
-        <Button
-            android:id="@+id/enrollButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:backgroundTint="#1A45EB"
-            android:text="2 · Enroll Device"
-            android:textColor="#FFFFFF" />
-
-        <Button
-            android:id="@+id/checkinButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:backgroundTint="#334155"
-            android:text="Force Check-in Now"
-            android:textColor="#FFFFFF"
-            android:visibility="gone" />
-
-        <Button
-            android:id="@+id/unenrollButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:backgroundTint="#7F1D1D"
-            android:text="Unenroll (leave management)"
-            android:textColor="#FFFFFF"
-            android:visibility="gone" />
+            android:text="🦖  Play while you wait" />
 
         <TextView
             android:id="@+id/logText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
-            android:textColor="#64748B"
+            android:textColor="@color/text_muted"
             android:textSize="12sp"
+            android:gravity="center_horizontal"
             android:fontFamily="monospace" />
 
     </LinearLayout>

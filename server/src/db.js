@@ -137,4 +137,50 @@ export function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_alerts_device ON alerts(device_id);
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
   `);
+
+  migrateDeviceScanColumns();
+}
+
+// devices table columns added after the initial release for the fleet
+// inventory scan. CREATE TABLE IF NOT EXISTS above does not retrofit an
+// existing database file, so add any missing columns here (idempotent —
+// checks pragma table_info before each ALTER TABLE).
+function migrateDeviceScanColumns() {
+  const existing = new Set(db.prepare('PRAGMA table_info(devices)').all().map((c) => c.name));
+  const newColumns = {
+    imei: 'TEXT',
+    phone_number: 'TEXT',
+    sim_operator: 'TEXT',
+    build_fingerprint: 'TEXT',
+    security_patch: 'TEXT',
+    management_mode: "TEXT NOT NULL DEFAULT 'none'",
+    // Admin-entered identifier (employee ID or contact number), set when the
+    // enrollment token is issued and carried onto the device at enroll time.
+    employee_id: 'TEXT',
+    // Server-gated permission for the on-device "IT setup / re-configure"
+    // technical view — off by default so a normal user never sees device
+    // internals; an admin flips this on remotely only when a technician
+    // actually needs to touch the device's setup screen.
+    allow_reconfigure: 'INTEGER NOT NULL DEFAULT 0',
+    // Best score from the on-device dino-runner mini-game.
+    high_score: 'INTEGER NOT NULL DEFAULT 0',
+    // Timestamp the device was flagged as having gone silent (no check-in past
+    // the offline-alert threshold). NULL while the device is reporting; set
+    // once by the offline monitor when it transitions to offline, and cleared
+    // on the next check-in. Drives one-shot "went offline"/"back online"
+    // logging instead of re-alerting on every sweep.
+    offline_since: 'TEXT',
+  };
+  for (const [name, ddl] of Object.entries(newColumns)) {
+    if (!existing.has(name)) {
+      db.exec(`ALTER TABLE devices ADD COLUMN ${name} ${ddl}`);
+    }
+  }
+
+  const existingTokenCols = new Set(
+    db.prepare('PRAGMA table_info(enrollment_tokens)').all().map((c) => c.name),
+  );
+  if (!existingTokenCols.has('employee_id')) {
+    db.exec('ALTER TABLE enrollment_tokens ADD COLUMN employee_id TEXT');
+  }
 }

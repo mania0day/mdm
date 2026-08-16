@@ -21,11 +21,26 @@ export const POLICY_SCHEMA = {
   max_failed_passwords: 10, // wipe after N failed unlocks (0 = disabled)
   max_screen_timeout_seconds: 300,
   disable_camera: false,
+  disable_mic: false,
   require_encryption: true,
   block_rooted: true,
   // Force device location services ON and prevent the user from turning them
   // off (Device Owner), so live tracking is always available.
   force_location_on: true,
+  // Keep airplane mode OFF and block the user from switching it on (Device
+  // Owner), so a managed device can't be taken off the network on purpose.
+  force_airplane_mode_off: true,
+  // Availability lockdown (Device Owner). Block the OS routes normally used to
+  // take a managed device off management or offline. Android has no API to stop
+  // a hardware power-off, so these cover what CAN actually be enforced:
+  //  - disallow_safe_boot: no Safe-Mode reboot (Safe Mode disables the admin).
+  //  - disallow_factory_reset: no factory reset from Settings.
+  //  - disallow_add_user: no secondary/guest user that lives outside the profile.
+  // Enforced continuously (re-asserted every check-in) and honestly reported as
+  // "requires Device Owner" on a device that is only a Device Admin.
+  disallow_safe_boot: true,
+  disallow_factory_reset: true,
+  disallow_add_user: true,
 };
 
 /**

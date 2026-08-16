@@ -1,7 +1,24 @@
 <resources>
-    <color name="brand">#1A45EB</color>
-    <color name="brand_dark">#0D1533</color>
+    <!-- Brand — kept in sync with the dashboard's brand-600/700/800 tokens -->
+    <color name="brand">#0369A1</color>
+    <color name="brand_dark">#075985</color>
+    <color name="brand_light">#E0F2FE</color>
+    <color name="accent">#16A34A</color>
+    <color name="danger">#DC2626</color>
+    <color name="danger_light">#FEF2F2</color>
+    <color name="amber">#D97706</color>
+
+    <!-- Light canvas + surfaces -->
+    <color name="bg_canvas">#EEF4FA</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="surface_border">#E2E8F0</color>
+
+    <!-- Text -->
+    <color name="text_primary">#0F172A</color>
+    <color name="text_secondary">#475569</color>
+    <color name="text_muted">#94A3B8</color>
+
+    <color name="white">#FFFFFF</color>
     <color name="slate_950">#0F172A</color>
     <color name="slate_800">#1E293B</color>
-    <color name="white">#FFFFFF</color>
 </resources>

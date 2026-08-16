@@ -35,6 +35,76 @@ object DeviceInfo {
         Build.UNKNOWN
     }
 
+    /** Full build fingerprint — useful for spotting tampered/custom builds. No permission needed. */
+    fun buildFingerprint(): String = Build.FINGERPRINT ?: "unknown"
+
+    /** Monthly Android security patch level, e.g. "2026-06-01". No permission needed. */
+    fun securityPatch(): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Build.VERSION.SECURITY_PATCH ?: "unknown" else "unknown"
+
+    /** "device_owner" (full fleet control) | "device_admin" (basic control) | "none". */
+    fun managementMode(context: Context): String {
+        val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
+        return when {
+            dpm.isDeviceOwnerApp(context.packageName) -> "device_owner"
+            dpm.isAdminActive(
+                android.content.ComponentName(context, com.sentroid.agent.admin.SentroidDeviceAdminReceiver::class.java),
+            ) -> "device_admin"
+            else -> "none"
+        }
+    }
+
+    /**
+     * IMEI is only readable by an app that IS the Device Owner (or holds carrier
+     * privileges) — Android blocks it for every other app since API 29,
+     * regardless of granted permissions. Returns null everywhere else rather
+     * than throwing, so this never breaks check-in on a regular (non-owner)
+     * enrolled device — the normal case for a BYOD/non-rooted fleet phone.
+     */
+    @Suppress("DEPRECATION")
+    fun imei(context: Context): String? {
+        val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
+        if (!dpm.isDeviceOwnerApp(context.packageName)) return null
+        return try {
+            val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) tm.imei else tm.deviceId
+        } catch (e: SecurityException) {
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Best-effort SIM-registered phone number. Frequently null/blank — many
+     * carriers never populate it regardless of permission state — so this is
+     * reported when available and otherwise left for an admin to enter
+     * manually in the console. Never blocks or crashes check-in.
+     */
+    fun phoneNumber(context: Context): String? {
+        val granted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.READ_PHONE_STATE,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) return null
+        return try {
+            val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager
+            @Suppress("DEPRECATION")
+            tm.line1Number?.trim()?.takeIf { it.isNotBlank() }
+        } catch (e: SecurityException) {
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** Best-effort carrier/SIM operator name. Not permission-gated on most OEMs. */
+    fun simOperator(context: Context): String? = try {
+        val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager
+        tm.networkOperatorName?.trim()?.takeIf { it.isNotBlank() }
+    } catch (e: Exception) {
+        null
+    }
+
     fun batteryLevel(context: Context): Int {
         val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
         return bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
@@ -70,23 +140,92 @@ object DeviceInfo {
             (Build.PRODUCT ?: "").contains("sdk") ||
             (Build.PRODUCT ?: "").contains("emulator")
 
-    fun isRooted(): Boolean {
-        // Root heuristics (su binaries) give false positives on emulator /
-        // userdebug images, which bundle `su` for adb root. Skip them there; on a
-        // real production device the checks below run normally.
+    /**
+     * Whether the keyguard is currently engaged (screen locked). Reported on
+     * every check-in so the console reflects the device's real lock state
+     * rather than only the last state it commanded.
+     */
+    fun isDeviceLocked(context: Context): Boolean {
+        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+            ?: return false
+        return runCatching { km.isKeyguardLocked }.getOrDefault(false)
+    }
+
+    /** Whether any screen-lock credential (PIN/pattern/password) is configured. */
+    fun isPasswordSet(context: Context): Boolean {
+        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+            ?: return false
+        return runCatching { km.isDeviceSecure }.getOrDefault(false)
+    }
+
+    /** Root-management apps. Their presence is the single strongest signal. */
+    private val rootPackages = listOf(
+        "com.topjohnwu.magisk",
+        "eu.chainfire.supersu",
+        "com.noshufou.android.su",
+        "com.noshufou.android.su.elite",
+        "com.koushikdutta.superuser",
+        "com.thirdparty.superuser",
+        "com.yellowes.su",
+        "me.weishu.kernelsu",
+        "com.kingroot.kinguser",
+        "com.kingo.root",
+    )
+
+    /**
+     * Paths that indicate an actual root install. `/sbin/su` is deliberately
+     * NOT in this list: stock MIUI ships it on retail `user/release-keys`
+     * builds, so treating it as proof of root marks every stock Redmi as
+     * compromised — which permanently pins the device to non-compliant.
+     * These locations only contain `su` when root has really been installed.
+     */
+    private val rootBinaries = listOf(
+        "/system/app/Superuser.apk",
+        "/system/bin/su",
+        "/system/xbin/su",
+        "/system/sbin/su",
+        "/data/local/xbin/su",
+        "/data/local/bin/su",
+        "/system/sd/xbin/su",
+        "/su/bin/su",
+        "/system/bin/magisk",
+        "/system/bin/.ext/.su",
+        "/cache/magisk.log",
+    )
+
+    /**
+     * Best-effort root detection. Requires a *positive* signal — an installed
+     * root manager, a su binary in a location only root installs write to, or
+     * a non-release build signature — rather than the mere existence of any
+     * file named `su` anywhere on the filesystem.
+     */
+    fun isRooted(context: Context? = null): Boolean {
+        // Emulator/userdebug images bundle `su` for `adb root`; that is expected,
+        // not a compromise.
         if (isEmulator()) return false
-        val paths = listOf(
-            "/system/app/Superuser.apk",
-            "/sbin/su",
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/data/local/xbin/su",
-            "/data/local/bin/su",
-            "/system/sd/xbin/su",
-            "/su/bin/su",
-            "/system/bin/magisk",
-        )
-        return paths.any { File(it).exists() }
+
+        // 1. A root manager app is installed.
+        if (context != null) {
+            val pm = context.packageManager
+            for (p in rootPackages) {
+                val found = runCatching {
+                    @Suppress("DEPRECATION")
+                    pm.getPackageInfo(p, 0)
+                    true
+                }.getOrDefault(false)
+                if (found) return true
+            }
+        }
+
+        // 2. A su binary sits somewhere only a root install would put it, and
+        //    is actually executable (a bare unreadable stub doesn't count).
+        if (rootBinaries.any { val f = File(it); f.exists() && f.canExecute() }) return true
+
+        // 3. The build itself isn't a signed release image. On a retail device
+        //    this means the ROM was replaced.
+        if ((Build.TAGS ?: "").contains("test-keys")) return true
+
+        return false
     }
 
     /** Whether device storage is reported as encrypted. */
@@ -154,11 +293,68 @@ object DeviceInfo {
             } catch (e: Exception) {
                 // fall through to cache / last-known
             }
+        } else {
+            // Pre-Android 11 there is no getCurrentLocation(), so without this
+            // branch a LOCATE on an older device would silently degrade to
+            // whatever stale fix happened to be cached — never actually turning
+            // the radio on when the server asks. Request live updates instead
+            // and tear them down as soon as we have a fix or time out.
+            try {
+                val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+                val latch = java.util.concurrent.CountDownLatch(1)
+                val holder = arrayOfNulls<android.location.Location>(1)
+                val listener = object : android.location.LocationListener {
+                    override fun onLocationChanged(location: android.location.Location) {
+                        if (holder[0] == null) {
+                            holder[0] = location
+                            latch.countDown()
+                        }
+                    }
+
+                    override fun onStatusChanged(provider: String?, status: Int, extras: android.os.Bundle?) {}
+                    override fun onProviderEnabled(provider: String) {}
+                    override fun onProviderDisabled(provider: String) {}
+                }
+                val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+                    .filter { runCatching { lm.isProviderEnabled(it) }.getOrDefault(false) }
+                if (providers.isNotEmpty()) {
+                    // Callbacks are delivered to the main looper, so this
+                    // background thread is free to block on the latch.
+                    for (p in providers) {
+                        lm.requestLocationUpdates(p, 0L, 0f, listener, android.os.Looper.getMainLooper())
+                    }
+                    latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    runCatching { lm.removeUpdates(listener) }
+                    holder[0]?.let {
+                        val fresh = Pair(it.latitude, it.longitude)
+                        cache(fresh)
+                        return fresh
+                    }
+                }
+            } catch (e: SecurityException) {
+                // fall through to cache / last-known
+            } catch (e: Exception) {
+                // fall through to cache / last-known
+            }
         }
         // Fallbacks: a recent cached fix, then last-known (may be stale).
         cachedLocation()?.let { return it }
         return lastLocation(context)?.also { cache(it) }
     }
+
+    /** Whether either location permission is currently granted. */
+    fun hasLocationPermission(context: Context): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+
+    /** Whether the OS location toggle is on at all (independent of app permission). */
+    fun locationServicesEnabled(context: Context): Boolean = runCatching {
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+            lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+    }.getOrDefault(false)
 
     // Shared daemon executor for async location callbacks; never shut down, so a
     // late getCurrentLocation delivery can never hit a terminated executor.
