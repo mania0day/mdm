@@ -41,7 +41,67 @@ export const POLICY_SCHEMA = {
   disallow_safe_boot: true,
   disallow_factory_reset: true,
   disallow_add_user: true,
+
+  // --- Corporate controls (block-or-watch) ---------------------------------
+  // Each of these pairs with an entry in RULE_MODES below, which decides whether
+  // the device physically BLOCKS the behaviour or merely reports it.
+  //
+  // block_outgoing_calls: company phone, company rules — stop personal//unbilled
+  //   calls. Enforced with DISALLOW_OUTGOING_CALLS (Device Owner).
+  // wifi_ssid_allowlist: the corporate networks a device may join. Anything else
+  //   is "free wifi" — a captive-portal/hotel/coffee-shop network is a classic
+  //   exfiltration and MITM risk. Hard enforcement needs Android 13+
+  //   (setWifiSsidPolicy); below that the agent can only observe and report,
+  //   which is precisely why monitor mode exists.
+  // block_new_app_installs / block_unknown_sources: nothing gets installed that
+  //   IT did not approve.
+  // disallow_usb_transfer / disallow_debugging / disable_screen_capture: the
+  //   standard data-loss-prevention trio (mass storage, ADB, screenshots).
+  block_outgoing_calls: false,
+  wifi_ssid_allowlist: [], // e.g. ["CorpWiFi","CorpWiFi-5G"]; empty = unrestricted
+  block_new_app_installs: false,
+  block_unknown_sources: true,
+  disallow_usb_transfer: false,
+  disallow_debugging: false,
+  disable_screen_capture: false,
+
+  // --- Per-rule enforcement mode -------------------------------------------
+  // The core of the design: every controllable rule is either
+  //   'enforce' - the device physically prevents it (default, block-first), or
+  //   'monitor' - the device allows it but reports each breach as a violation,
+  //               which raises an alert and lands in the device's Violations
+  //               tab, or
+  //   'off'     - the rule is not applied and not watched.
+  // Monitor mode is not a lesser enforce: it is how you learn what people
+  // actually do before you clamp down, and it is the ONLY option for rules the
+  // handset is too old to enforce (see wifi_ssid_allowlist above) — a device
+  // that cannot block is still perfectly capable of reporting.
+  rule_modes: {
+    disable_camera: 'enforce',
+    disable_mic: 'enforce',
+    block_outgoing_calls: 'enforce',
+    wifi_ssid_allowlist: 'monitor',
+    force_airplane_mode_off: 'enforce',
+    block_new_app_installs: 'enforce',
+    block_unknown_sources: 'enforce',
+    disallow_usb_transfer: 'enforce',
+    disallow_debugging: 'enforce',
+    disable_screen_capture: 'enforce',
+  },
 };
+
+/** Valid values for any entry in rule_modes. */
+export const RULE_MODES = ['enforce', 'monitor', 'off'];
+
+/**
+ * The mode a single rule runs in, falling back to the schema default (and
+ * finally to 'enforce') so a policy saved before rule_modes existed keeps
+ * behaving exactly as it did — block-first.
+ */
+export function ruleMode(policy, rule) {
+  const mode = policy?.rule_modes?.[rule] ?? POLICY_SCHEMA.rule_modes[rule];
+  return RULE_MODES.includes(mode) ? mode : 'enforce';
+}
 
 /**
  * Resolve the effective policy for a device: its explicit assignment,
@@ -58,7 +118,19 @@ export function effectivePolicyForDevice(deviceId) {
   } catch {
     cfg = {};
   }
-  return { id: row.id, name: row.name, config: { ...POLICY_SCHEMA, ...cfg } };
+  return {
+    id: row.id,
+    name: row.name,
+    // rule_modes is merged one level deeper than the rest: a spread alone would
+    // let a policy that names a single rule's mode silently drop the defaults
+    // for every other rule, turning unmentioned rules into undefined (i.e. no
+    // enforcement) rather than leaving them at their block-first default.
+    config: {
+      ...POLICY_SCHEMA,
+      ...cfg,
+      rule_modes: { ...POLICY_SCHEMA.rule_modes, ...(cfg.rule_modes || {}) },
+    },
+  };
 }
 
 /**

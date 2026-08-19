@@ -76,6 +76,24 @@
             android:enabled="true"
             android:exported="false" />
 
+        <!--
+          Report a shutdown/reboot in the seconds before the device goes dark.
+          Android exposes no way to BLOCK a power-off (no API, app overlays are
+          force-hidden over system dialogs, and a long-press shutdown is handled
+          in firmware), so a deliberate power-off is made accountable instead of
+          preventable: without this the console cannot tell "switched off" apart
+          from a flat battery or lost signal.
+        -->
+        <receiver
+            android:name=".service.ShutdownReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.ACTION_SHUTDOWN" />
+                <action android:name="android.intent.action.REBOOT" />
+            </intent-filter>
+        </receiver>
+
         <!-- Re-launch the agent after device reboot -->
         <receiver
             android:name=".service.BootReceiver"

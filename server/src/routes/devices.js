@@ -181,6 +181,28 @@ devicesRouter.get('/:id/commands', (req, res) => {
   res.json({ commands: commandsForDevice.all(device.id) });
 });
 
+// GET /api/devices/:id/violations -> what this device actually did against
+// policy. Backs the device's Violations tab: rules in 'monitor' mode are never
+// blocked on the handset, so these rows are the only record that a breach ever
+// happened. Newest first, capped like the other per-device histories.
+devicesRouter.get('/:id/violations', (req, res) => {
+  const device = getStmt.get(req.params.id);
+  if (!device) throw httpError(404, 'Device not found');
+  const rows = db
+    .prepare(
+      `SELECT id, rule, mode, severity, detail, metadata, occurred_at, created_at
+         FROM policy_violations WHERE device_id = ?
+        ORDER BY created_at DESC LIMIT 200`,
+    )
+    .all(device.id);
+  res.json({
+    violations: rows.map((r) => ({
+      ...r,
+      metadata: r.metadata ? JSON.parse(r.metadata) : null,
+    })),
+  });
+});
+
 // POST /api/devices/:id/policy -> assign a policy (admin+)
 devicesRouter.post(
   '/:id/policy',

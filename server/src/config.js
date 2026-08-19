@@ -76,6 +76,10 @@ export const COMMAND_TYPES = {
   ENFORCE_POLICY: { destructive: false, minRole: 'admin', label: 'Enforce Policy' },
   DISABLE: { destructive: true, minRole: 'admin', label: 'Disable Device' },
   ENABLE: { destructive: false, minRole: 'admin', label: 'Re-enable Device' },
+  // The only remote power control Android exposes: reboot. There is NO API to
+  // power a device OFF (even as Device Owner), so "Restart" is as far as it goes.
+  // Device Owner only; the agent reports honestly on a plain Device Admin.
+  RESTART: { destructive: false, minRole: 'admin', label: 'Restart Device' },
   WIPE: { destructive: true, minRole: 'admin', label: 'Factory Reset / Wipe' },
   REMOTE_UNINSTALL: { destructive: true, minRole: 'admin', label: 'Remove App (Uninstall)' },
 };

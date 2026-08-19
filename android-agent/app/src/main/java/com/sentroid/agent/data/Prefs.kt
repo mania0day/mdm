@@ -95,6 +95,30 @@ class Prefs(context: Context) {
         get() = sp.getString(KEY_PENDING_TOKEN, null)
         set(v) = sp.edit().putString(KEY_PENDING_TOKEN, v).apply()
 
+    /**
+     * The Device Owner reset-password token — what makes "the employee forgot
+     * their PIN, unlock it without wiping" possible.
+     *
+     * Android only lets a Device Owner change an existing lock screen if it
+     * holds a token that was registered BEFORE the lockout and then activated by
+     * the user entering their credential once. The token must therefore survive
+     * across reboots and app restarts: a token generated fresh at reset time is
+     * always inactive and useless, because activation can't happen while the
+     * user is locked out. Persisting it here is what turns remote unlock from
+     * impossible into a one-command recovery with zero data loss.
+     *
+     * Stored Base64. It is only ever usable by this app on this device, and only
+     * while it is Device Owner; it is cleared on unenrollment along with the rest
+     * of the enrollment state.
+     */
+    var resetPasswordToken: ByteArray?
+        get() = sp.getString(KEY_RESET_TOKEN, null)
+            ?.let { runCatching { android.util.Base64.decode(it, android.util.Base64.NO_WRAP) }.getOrNull() }
+        set(v) = sp.edit().putString(
+            KEY_RESET_TOKEN,
+            v?.let { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) },
+        ).apply()
+
     val isEnrolled: Boolean
         get() = !deviceToken.isNullOrEmpty()
 
@@ -127,5 +151,6 @@ class Prefs(context: Context) {
         private const val KEY_VIOLATIONS = "last_violations"
         private const val KEY_ALLOW_RECONFIGURE = "allow_reconfigure"
         private const val KEY_HIGH_SCORE = "local_high_score"
+        private const val KEY_RESET_TOKEN = "reset_password_token"
     }
 }

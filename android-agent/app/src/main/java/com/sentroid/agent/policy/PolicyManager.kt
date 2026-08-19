@@ -55,6 +55,38 @@ class PolicyManager(private val context: Context) {
         }
     }
 
+    /**
+     * Cement SENTROID as un-removable, always-on organization property — the
+     * phone belongs to the org, so the employee cannot take the agent off it.
+     *
+     * Being Device Owner already prevents the user from uninstalling the app or
+     * deactivating its admin; these two calls close the remaining escape routes
+     * so the agent behaves like a resident system service:
+     *  - setUninstallBlocked(self): belt-and-suspenders against uninstall, and
+     *    it also blocks uninstall via `adb`/PackageInstaller, not just the UI.
+     *  - setUserControlDisabledPackages (Android 11 / API 30+): removes the
+     *    "Force stop" and "Clear storage" buttons in Settings, so the user
+     *    cannot kill the check-in service or wipe the agent's state. No API for
+     *    this exists below 30, so on Android 10 it is a documented best-effort
+     *    (the foreground service + BootReceiver + crash-restart still keep it up).
+     *
+     * Device Owner only — a plain Device Admin cannot do either, and applyPolicy
+     * reports it as "requires Device Owner" rather than faking success. The only
+     * way off the device remains the server-issued WIPE (factory reset).
+     */
+    fun enforceOwnership(): String {
+        if (!dpm.isDeviceOwnerApp(context.packageName)) {
+            throw SecurityException("requires Device Owner")
+        }
+        val pkg = context.packageName
+        dpm.setUninstallBlocked(admin, pkg, true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            dpm.setUserControlDisabledPackages(admin, listOf(pkg))
+            return "ownership locked (uninstall + force-stop blocked)"
+        }
+        return "ownership locked (uninstall blocked; force-stop block needs Android 11+)"
+    }
+
     /** Apply a policy JSON (min password length, camera, failed-attempt wipe, etc.). */
     fun applyPolicy(policy: JSONObject): String {
         if (!isAdminActive()) return "skipped: device admin not active"
@@ -77,6 +109,20 @@ class PolicyManager(private val context: Context) {
                 restricted.append("$label ")
             }
         }
+
+        // Cement organization ownership FIRST, before any other policy: make the
+        // agent un-uninstallable and un-force-stoppable so it stays resident like
+        // a system service on this org-owned device. Re-asserted on every policy
+        // apply (i.e. every check-in) for continuous enforcement, and reported as
+        // "requires Device Owner" on a plain Device Admin instead of faking it.
+        tryApply("ownership-lock") { enforceOwnership() }
+
+        // Arm lock-screen recovery as early as possible — ideally at enrollment,
+        // while IT still holds the unlocked device. A reset token can only be
+        // activated by the user unlocking once, which is impossible after they
+        // are locked out, so registering it late means no recovery at all and a
+        // wipe as the only way back in. No-op once a token is stored.
+        tryApply("recovery-token") { ensureResetPasswordToken() }
 
         val quality = policy.optString("password_quality", "numeric")
         val minLen = policy.optInt("min_password_length", 6)
@@ -313,34 +359,115 @@ class PolicyManager(private val context: Context) {
     }
 
     /**
-     * Set (reset) a new lock-screen password. The legacy resetPassword() is
-     * blocked for device admins on Android 8+, so when provisioned as Device
-     * Owner we use the modern reset-password-token flow.
+     * Restart (reboot) the device. This is the ONLY remote power control Android
+     * offers — there is no API to power a device OFF, even for a Device Owner —
+     * so the server's "Restart" maps here. dpm.reboot() is Device Owner–only
+     * (API 24+) and the OS refuses it while a phone call is in progress; we
+     * report each case honestly instead of a blind failure.
+     *
+     * Note: on success the device reboots immediately, so the "completed" result
+     * usually never reaches the server — the device dropping offline and then
+     * checking back in is the real confirmation, exactly like WIPE.
+     */
+    fun reboot(): String {
+        if (!dpm.isDeviceOwnerApp(context.packageName)) {
+            return "restart unavailable: requires Device Owner (this device is Device Admin only)"
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return "restart unavailable: requires Android 7+ (device runs ${Build.VERSION.RELEASE})"
+        }
+        return try {
+            dpm.reboot(admin)
+            "restart requested — device is rebooting"
+        } catch (e: IllegalStateException) {
+            "restart deferred: a phone call is in progress (Android blocks reboot mid-call)"
+        } catch (e: Exception) {
+            "restart failed: ${e.message?.take(60)}"
+        }
+    }
+
+    /**
+     * Arm lock-screen recovery: register a reset-password token ONCE and keep it.
+     *
+     * This is what makes "the employee is locked out — unlock the phone without
+     * losing their data" possible. Android will only let a Device Owner change an
+     * EXISTING lock screen if it presents a token that was registered beforehand
+     * and then activated by the user entering their credential once. Activation
+     * cannot happen while somebody is already locked out, so the token has to be
+     * put in place early — at enrollment, while IT still has the unlocked device
+     * — and persisted (Prefs.resetPasswordToken) for the life of the enrollment.
+     *
+     * Called on every policy apply, but only *registers* when no token is stored:
+     * calling setResetPasswordToken again would replace the token and silently
+     * de-activate recovery, which is exactly the failure mode this guards against.
+     *
+     * Returns the recovery state so the console can show whether this device is
+     * actually recoverable yet, instead of finding out only when it's too late.
+     */
+    fun ensureResetPasswordToken(): String {
+        if (!dpm.isDeviceOwnerApp(context.packageName)) {
+            throw SecurityException("requires Device Owner")
+        }
+        val prefs = com.sentroid.agent.data.Prefs(context)
+        if (prefs.resetPasswordToken == null) {
+            val bytes = ByteArray(32)
+            java.security.SecureRandom().nextBytes(bytes)
+            // Can legitimately fail on devices without the secure hardware this
+            // needs; report rather than pretend recovery is available.
+            if (!dpm.setResetPasswordToken(admin, bytes)) {
+                return "recovery unavailable (device rejected the reset token)"
+            }
+            prefs.resetPasswordToken = bytes
+        }
+        return if (dpm.isResetPasswordTokenActive(admin)) {
+            "recovery armed"
+        } else {
+            "recovery pending — user must unlock the device once to activate it"
+        }
+    }
+
+    /** Whether a remote unlock would actually work on this device right now. */
+    fun isRecoveryArmed(): Boolean = runCatching {
+        dpm.isDeviceOwnerApp(context.packageName) &&
+            com.sentroid.agent.data.Prefs(context).resetPasswordToken != null &&
+            dpm.isResetPasswordTokenActive(admin)
+    }.getOrDefault(false)
+
+    /**
+     * Set a new lock-screen password — the remote-unlock path for a locked-out
+     * employee. Uses the PERSISTED token from ensureResetPasswordToken(), which
+     * is the whole point: the device keeps all its data and simply gets a new
+     * PIN the admin can read off the console and pass to the user.
+     *
+     * The legacy resetPassword() is blocked for device admins on Android 8+, so
+     * a plain Device Admin genuinely cannot do this and is told so.
      */
     fun resetPassword(newPassword: String): String {
         if (!isAdminActive()) return "failed: device admin not active"
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                dpm.isDeviceOwnerApp(context.packageName)
-            ) {
-                val token = ByteArray(32)
-                java.security.SecureRandom().nextBytes(token)
-                val set = dpm.setResetPasswordToken(admin, token)
-                if (set && dpm.isResetPasswordTokenActive(admin)) {
-                    val ok = dpm.resetPasswordWithToken(admin, newPassword, token, 0)
-                    if (ok) "lock password reset (via token)" else "reset failed"
-                } else {
-                    "reset token registered; needs one credential entry to activate"
-                }
+            if (!dpm.isDeviceOwnerApp(context.packageName)) {
+                return "unlock requires Device Owner — Android 8+ blocks a plain Device Admin from changing an existing lock screen"
+            }
+            // Make sure a token exists (no-op if one was already armed at enrollment).
+            val state = ensureResetPasswordToken()
+            val stored = com.sentroid.agent.data.Prefs(context).resetPasswordToken
+                ?: return "unlock unavailable: $state"
+            if (!dpm.isResetPasswordTokenActive(admin)) {
+                // The honest, actionable case: recovery was never activated, so
+                // there is no way in without a wipe. Say exactly what to do.
+                return "unlock unavailable: $state. Recovery must be armed BEFORE a lockout — " +
+                    "have the user unlock the device once while enrolled, then this will work."
+            }
+            val ok = dpm.resetPasswordWithToken(admin, newPassword, stored, 0)
+            if (ok) {
+                "lock screen reset to the new PIN — all data preserved, no factory reset"
             } else {
-                @Suppress("DEPRECATION")
-                val ok = dpm.resetPassword(newPassword, DevicePolicyManager.RESET_PASSWORD_REQUIRE_ENTRY)
-                if (ok) "password reset" else "requires Device Owner provisioning"
+                "reset rejected by the device (the new PIN may not meet the enforced password policy)"
             }
         } catch (e: SecurityException) {
-            "reset requires Device Owner: ${e.message?.take(40)}"
+            "reset requires Device Owner: ${e.message?.take(60)}"
         } catch (e: Exception) {
-            "reset error: ${e.message?.take(40)}"
+            "reset error: ${e.message?.take(60)}"
         }
     }
 

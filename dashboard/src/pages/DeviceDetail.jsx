@@ -35,6 +35,10 @@ const COMMAND_GROUPS = [
     commands: [
       { type: 'LOCK', label: 'Lock', role: 'operator', confirm: false },
       { type: 'RING', label: 'Ring', role: 'operator', confirm: false },
+      // Reboot is the only remote power control Android exposes (there is no
+      // power-off API). Device Owner only; confirmed because it interrupts the
+      // user, and the agent defers it if a call is in progress.
+      { type: 'RESTART', label: 'Restart', role: 'admin', confirm: true },
       { type: 'ENFORCE_POLICY', label: 'Re-enforce Policy', role: 'admin', confirm: false },
       { type: 'ENABLE', label: 'Re-enable', role: 'admin', confirm: false },
     ],

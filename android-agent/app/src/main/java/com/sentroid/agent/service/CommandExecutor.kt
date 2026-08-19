@@ -39,6 +39,11 @@ class CommandExecutor(private val context: Context) {
 
                 "WIPE" -> "completed" to policy.wipe()
 
+                "RESTART" -> {
+                    val res = policy.reboot()
+                    if (res.startsWith("restart requested")) "completed" to res else "failed" to res
+                }
+
                 "DISABLE" -> {
                     prefs.disabled = true
                     val lockResult = policy.lockNow()

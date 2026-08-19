@@ -133,9 +133,37 @@ export function initSchema() {
       created_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Policy violations reported by the agent.
+    --
+    -- The other half of the enforce/monitor design: a rule in 'monitor' mode is
+    -- deliberately NOT blocked on the device, so the only trace it ever leaves
+    -- is the record written here. (A rule in 'enforce' mode can also land here
+    -- when the handset is too old to enforce it — an Android 10 phone cannot
+    -- block a non-approved Wi-Fi SSID, but it can still report joining one.)
+    --
+    -- Kept separate from the alerts table: an alert is an operator notification that
+    -- gets acknowledged and cleared, whereas a violation is durable evidence of
+    -- what a specific device did — "who used the camera / made calls / joined an
+    -- unapproved network" — and is what the device's Violations tab reads.
+    -- Both are written for a breach: this row is the record, the alert is the
+    -- notification.
+    CREATE TABLE IF NOT EXISTS policy_violations (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id   INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+      rule        TEXT NOT NULL,          -- e.g. 'block_outgoing_calls'
+      mode        TEXT NOT NULL,          -- mode in force when it happened
+      severity    TEXT NOT NULL DEFAULT 'warning',
+      detail      TEXT,                   -- human-readable specifics
+      metadata    TEXT,                   -- JSON: ssid, package name, number, ...
+      occurred_at TEXT,                   -- device clock, when it actually happened
+      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_commands_device ON commands(device_id, status);
     CREATE INDEX IF NOT EXISTS idx_alerts_device ON alerts(device_id);
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_violations_device
+      ON policy_violations(device_id, created_at DESC);
   `);
 
   migrateDeviceScanColumns();

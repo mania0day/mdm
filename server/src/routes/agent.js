@@ -477,6 +477,101 @@ agentRouter.post(
   }),
 );
 
+// Severity per rule: what it actually means for the organization when this
+// specific rule is breached, rather than one flat level for everything.
+const VIOLATION_SEVERITY = {
+  block_outgoing_calls: 'warning',
+  wifi_ssid_allowlist: 'critical', // unapproved network = MITM / exfiltration risk
+  block_new_app_installs: 'critical', // unvetted software on a corporate device
+  block_unknown_sources: 'critical',
+  disable_camera: 'warning',
+  disable_mic: 'warning',
+  force_airplane_mode_off: 'warning',
+  disallow_usb_transfer: 'critical',
+  disallow_debugging: 'critical',
+  disable_screen_capture: 'warning',
+};
+
+const violationSchema = z.object({
+  violations: z
+    .array(
+      z.object({
+        rule: z.string().min(1).max(64),
+        mode: z.enum(['enforce', 'monitor', 'off']).optional(),
+        detail: z.string().max(500).optional(),
+        metadata: z.record(z.any()).optional(),
+        occurred_at: z.string().max(40).optional(),
+      }),
+    )
+    .max(50),
+});
+
+// POST /api/agent/violations -> the device reports policy breaches it observed.
+//
+// This is what makes 'monitor' mode meaningful. A monitored rule is deliberately
+// not blocked on the handset, so unless the agent tells us, the breach leaves no
+// trace anywhere. Enforced rules can report here too, when the device is too old
+// to actually block them (e.g. Wi-Fi SSID allowlisting needs Android 13+): the
+// device still knows it joined an unapproved network even when it could not stop
+// itself, and reporting that is far better than silently doing nothing.
+//
+// Each breach is stored as durable evidence (policy_violations, read by the
+// device's Violations tab) AND raised as an operator alert — record vs
+// notification. raiseAlert() already de-duplicates repeats within its window, so
+// a device that keeps re-breaching does not flood the alert list.
+agentRouter.post(
+  '/violations',
+  requireDevice,
+  asyncHandler(async (req, res) => {
+    const device = req.device;
+    const { violations } = violationSchema.parse(req.body || {});
+    if (!violations.length) return res.json({ ok: true, recorded: 0 });
+
+    const insert = db.prepare(`
+      INSERT INTO policy_violations (device_id, rule, mode, severity, detail, metadata, occurred_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const recordAll = db.transaction((rows) => {
+      for (const v of rows) {
+        const severity = VIOLATION_SEVERITY[v.rule] || 'warning';
+        insert.run(
+          device.id,
+          v.rule,
+          v.mode || 'monitor',
+          severity,
+          v.detail || null,
+          v.metadata ? JSON.stringify(v.metadata) : null,
+          v.occurred_at || null,
+        );
+      }
+    });
+    recordAll(violations);
+
+    for (const v of violations) {
+      const severity = VIOLATION_SEVERITY[v.rule] || 'warning';
+      raiseAlert({
+        deviceId: device.id,
+        severity,
+        type: `POLICY_VIOLATION_${v.rule.toUpperCase()}`,
+        message: `"${device.name}" policy violation — ${v.detail || v.rule}`,
+      });
+      audit({
+        actorType: 'device',
+        actorId: device.id,
+        actorLabel: device.name,
+        action: 'POLICY_VIOLATION',
+        targetType: 'device',
+        targetId: device.id,
+        details: { rule: v.rule, mode: v.mode, detail: v.detail, ...(v.metadata || {}) },
+        ip: req.ip,
+      });
+    }
+
+    res.json({ ok: true, recorded: violations.length });
+  }),
+);
+
 const gameScoreSchema = z.object({
   score: z.number().int().min(0).max(1_000_000),
 });
