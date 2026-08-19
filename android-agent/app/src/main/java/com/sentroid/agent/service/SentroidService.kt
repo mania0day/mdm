@@ -22,6 +22,7 @@ import com.sentroid.agent.data.ApiClient
 import com.sentroid.agent.data.EnrollmentManager
 import com.sentroid.agent.data.Prefs
 import com.sentroid.agent.policy.PolicyManager
+import com.sentroid.agent.policy.ViolationMonitor
 import com.sentroid.agent.util.DeviceInfo
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
@@ -85,6 +86,12 @@ class SentroidService : Service() {
         }
         registerNetworkCallback()
         registerScreenReceiver()
+        // Arm the monitor-mode detectors (outgoing calls, Wi-Fi SSID). Idempotent
+        // like the two registrations above, and started here rather than at the
+        // first check-in because a breach in the window between boot and the first
+        // successful check-in still has to be caught — the detector must already
+        // be listening when the call is dialled.
+        ViolationMonitor.start(applicationContext)
 
         val p = Prefs(applicationContext)
         if (p.isEnrolled || p.pendingEnrollToken != null) {
@@ -188,6 +195,10 @@ class SentroidService : Service() {
         netCallback = null
         screenReceiver?.let { r -> try { unregisterReceiver(r) } catch (_: Exception) {} }
         screenReceiver = null
+        // Unhook the monitor's telephony/Wi-Fi listeners. Anything it has already
+        // detected stays queued: the service is routinely destroyed and revived by
+        // its alarm, and an unreported breach must survive that round trip.
+        ViolationMonitor.stop(applicationContext)
         // Note: we intentionally do NOT cancel the check-in alarm here — if the
         // system kills the service, the next alarm resurrects it. The alarm is
         // cancelled only on explicit unenroll.
@@ -281,6 +292,23 @@ class SentroidService : Service() {
         result.policy?.let {
             prefs.lastPolicyJson = it.toString()
             policyMgr.applyPolicy(it)
+        }
+
+        // Report what the device WATCHED rather than blocked. Monitored rules are
+        // not enforced on the handset, so this POST is the only record such a
+        // breach ever happened; on failure the batch goes back on the queue and
+        // the next check-in retries it, rather than the evidence being lost.
+        val watched = result.policy ?: prefs.lastPolicyJson?.let { JSONObject(it) }
+        if (watched != null) {
+            val breaches = ViolationMonitor.collectViolations(watched)
+            if (breaches.isNotEmpty()) {
+                try {
+                    api.reportViolations(breaches)
+                } catch (e: Exception) {
+                    ViolationMonitor.requeue(breaches)
+                    android.util.Log.w("SentroidService", "violation report failed; requeued ${breaches.size}", e)
+                }
+            }
         }
 
         for (cmd in result.commands) {

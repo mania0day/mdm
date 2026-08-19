@@ -3,6 +3,16 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!--
+      Required to read the connected Wi-Fi SSID, which is how the agent detects
+      a device joining a network outside the corporate allowlist. On Android
+      10-11 WifiManager.connectionInfo is the only SSID read path available, and
+      it throws SecurityException without this — so without it the Wi-Fi rule
+      would silently never fire on exactly the oldest devices that cannot
+      enforce an allowlist (hard enforcement needs Android 13+) and therefore
+      depend on monitoring. Install-time normal permission: no user prompt.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Required (targetSdk 34+) for a foreground service to access location -->

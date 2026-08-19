@@ -538,7 +538,13 @@ agentRouter.post(
         insert.run(
           device.id,
           v.rule,
-          v.mode || 'monitor',
+          // Fail safe, exactly as ruleMode() does: an unreported mode must not
+          // be recorded as 'monitor', because the console renders that as
+          // "allowed by design — the device reported it instead of blocking it",
+          // which asserts an intent we have no evidence for. 'enforce' reads as
+          // "this should have been blocked and wasn't", which is the honest
+          // reading of a breach whose mode we don't know.
+          v.mode || 'enforce',
           severity,
           v.detail || null,
           v.metadata ? JSON.stringify(v.metadata) : null,

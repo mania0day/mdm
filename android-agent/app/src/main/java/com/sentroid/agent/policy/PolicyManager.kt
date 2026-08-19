@@ -92,6 +92,13 @@ class PolicyManager(private val context: Context) {
         if (!isAdminActive()) return "skipped: device admin not active"
         val applied = StringBuilder()
         val restricted = StringBuilder()
+        // A third bucket, deliberately separate from `restricted`: a few rules go
+        // unenforced because this Android version has no API for them at all,
+        // which is a different answer from "needs Device Owner" — re-provisioning
+        // the handset would fix the second and would change nothing about the
+        // first. Folding them together would send an operator chasing a fix that
+        // cannot exist on that device.
+        val unenforceable = StringBuilder()
 
         // Each restriction is applied independently: several DevicePolicyManager
         // controls (password quality, camera, screen-timeout) require Device Owner
@@ -107,6 +114,24 @@ class PolicyManager(private val context: Context) {
                 // Profile Owner provisioning; a plain Device Admin cannot apply them.
                 android.util.Log.w("SentroidPolicy", "restriction '$label' requires Device Owner", e)
                 restricted.append("$label ")
+            }
+        }
+
+        // One boolean user-restriction rule, applied under its per-rule mode.
+        //
+        // The mode is what decides whether the OS blocks: only 'enforce' can turn
+        // a restriction ON. 'monitor' and 'off' actively turn it OFF rather than
+        // merely skipping it, because a restriction added by yesterday's policy is
+        // still latched into the OS today — and a "monitored" rule the handset
+        // quietly keeps blocking can never produce the breach the console is
+        // waiting for, so the Violations tab would sit empty and read as "nobody
+        // ever did this". Detection for monitored rules lives in the breach
+        // detector, not here; this method's only job is to get out of its way.
+        fun tryRestriction(label: String, rule: String, restriction: String) {
+            val mode = ruleMode(policy, rule)
+            val block = mode == MODE_ENFORCE && policy.optBoolean(rule, false)
+            tryApply("$label=${if (block) "blocked" else "allowed"}${modeNote(mode)}") {
+                applyRestriction(restriction, block)
             }
         }
 
@@ -145,8 +170,14 @@ class PolicyManager(private val context: Context) {
         if (timeoutSec > 0) tryApply("maxLock=${timeoutSec}s") {
             dpm.setMaximumTimeToLock(admin, timeoutSec * 1000L)
         }
-        val disableCam = policy.optBoolean("disable_camera", false)
-        tryApply("camera=${if (disableCam) "disabled" else "enabled"}") {
+        // Camera and microphone run through the same per-rule mode gate as the
+        // corporate controls below: both are named in POLICY_SCHEMA.rule_modes,
+        // so honouring only their boolean would silently keep blocking a rule an
+        // operator had switched to 'monitor' — the hardware would stay dead while
+        // the console promised it was merely being watched.
+        val camMode = ruleMode(policy, "disable_camera")
+        val disableCam = camMode == MODE_ENFORCE && policy.optBoolean("disable_camera", false)
+        tryApply("camera=${if (disableCam) "disabled" else "enabled"}${modeNote(camMode)}") {
             dpm.setCameraDisabled(admin, disableCam)
         }
 
@@ -154,8 +185,9 @@ class PolicyManager(private val context: Context) {
         // the real mechanism is a system-wide user restriction that mutes and
         // locks the mic, which (like camera/password/location) only a Device
         // Owner can set. A plain Device Admin throws here, same as the others.
-        val disableMic = policy.optBoolean("disable_mic", false)
-        tryApply("mic=${if (disableMic) "disabled" else "enabled"}") {
+        val micMode = ruleMode(policy, "disable_mic")
+        val disableMic = micMode == MODE_ENFORCE && policy.optBoolean("disable_mic", false)
+        tryApply("mic=${if (disableMic) "disabled" else "enabled"}${modeNote(micMode)}") {
             if (!dpm.isDeviceOwnerApp(context.packageName)) throw SecurityException("requires Device Owner")
             if (disableMic) {
                 dpm.addUserRestriction(admin, android.os.UserManager.DISALLOW_UNMUTE_MICROPHONE)
@@ -192,8 +224,13 @@ class PolicyManager(private val context: Context) {
         // re-asserted here on every policy apply (i.e. every check-in) so it is
         // continuously enforced rather than a one-shot toggle. Device Owner +
         // Android 9 (P) only; a plain Device Admin reports it as unenforceable.
-        val blockAirplane = policy.optBoolean("force_airplane_mode_off", false)
-        tryApply("airplane=${if (blockAirplane) "blocked-off" else "user-controlled"}") {
+        // Mode-gated like camera and mic: 'monitor' must genuinely let the user
+        // toggle airplane mode, otherwise the breach the console is waiting to
+        // record can never happen.
+        val airplaneMode = ruleMode(policy, "force_airplane_mode_off")
+        val blockAirplane =
+            airplaneMode == MODE_ENFORCE && policy.optBoolean("force_airplane_mode_off", false)
+        tryApply("airplane=${if (blockAirplane) "blocked-off" else "user-controlled"}${modeNote(airplaneMode)}") {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && dpm.isDeviceOwnerApp(context.packageName)) {
                 if (blockAirplane) {
                     dpm.addUserRestriction(admin, android.os.UserManager.DISALLOW_AIRPLANE_MODE)
@@ -233,13 +270,287 @@ class PolicyManager(private val context: Context) {
             else dpm.clearUserRestriction(admin, android.os.UserManager.DISALLOW_ADD_USER)
         }
 
+        // --- Corporate controls (block-or-watch) ------------------------------
+        // Every rule below is gated on its entry in the policy's rule_modes object
+        // (POLICY_SCHEMA / ruleMode() in the server's policyEngine.js). Only
+        // 'enforce' reaches DevicePolicyManager here; see tryRestriction above for
+        // why 'monitor' and 'off' clear rather than skip.
+
+        // Company phone, company rules. DISALLOW_OUTGOING_CALLS stops the dialer
+        // placing calls; emergency numbers stay dialable no matter what a policy
+        // says — Android never lets an admin block them, and SENTROID does not
+        // pretend to. Device Owner only, like every restriction in this section.
+        tryRestriction("calls", "block_outgoing_calls", android.os.UserManager.DISALLOW_OUTGOING_CALLS)
+
+        // Nothing gets installed that IT did not approve. DISALLOW_INSTALL_APPS
+        // covers the user-facing install routes — Play Store, a browser download,
+        // any PackageInstaller session — not just sideloading, which is the
+        // narrower unknown-sources rule below.
+        tryRestriction("appInstalls", "block_new_app_installs", android.os.UserManager.DISALLOW_INSTALL_APPS)
+
+        // Sideloading ("install unknown apps"). Two restrictions exist and they are
+        // NOT interchangeable:
+        //  - DISALLOW_INSTALL_UNKNOWN_SOURCES applies to the user it is set on and
+        //    is the key the primary user's install flow has honoured since API 21.
+        //  - DISALLOW_INSTALL_UNKNOWN_SOURCES_GLOBALLY (API 29+, Device Owner
+        //    only) applies to EVERY user on the device, including a secondary or
+        //    guest user created later — which disallow_add_user may or may not be
+        //    blocking, since that is a separate switch in the same policy.
+        // We set both, so there is no gap on any of Android 10-16. The global
+        // variant landed exactly at our API floor (29), so it needs no guard.
+        val unknownMode = ruleMode(policy, "block_unknown_sources")
+        val blockUnknown = unknownMode == MODE_ENFORCE && policy.optBoolean("block_unknown_sources", false)
+        tryApply("unknownSources=${if (blockUnknown) "blocked" else "allowed"}${modeNote(unknownMode)}") {
+            applyRestriction(android.os.UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES, blockUnknown)
+            applyRestriction(android.os.UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES_GLOBALLY, blockUnknown)
+        }
+
+        // Data-loss prevention: no phone-as-mass-storage. DISALLOW_USB_FILE_TRANSFER
+        // removes the MTP/PTP file-transfer option from the USB preferences.
+        // Charging over the same cable is unaffected — there is no API to stop
+        // that, and no reason to want one.
+        tryRestriction("usbTransfer", "disallow_usb_transfer", android.os.UserManager.DISALLOW_USB_FILE_TRANSFER)
+
+        // DISALLOW_DEBUGGING_FEATURES closes Developer Options and USB debugging —
+        // the route an employee would otherwise use to `adb` their way around
+        // every other restriction here.
+        tryRestriction("debugging", "disallow_debugging", android.os.UserManager.DISALLOW_DEBUGGING_FEATURES)
+
+        // Screenshots and screen recording. setScreenCaptureDisabled is the only
+        // API for this and it requires Device Owner / Profile Owner, so a plain
+        // Device Admin is reported as unapplied instead of silently ignored. Note
+        // the honest ceiling: it cannot stop somebody photographing the screen
+        // with a second phone. No MDM can, and this one does not claim to.
+        val captureMode = ruleMode(policy, "disable_screen_capture")
+        val blockCapture = captureMode == MODE_ENFORCE && policy.optBoolean("disable_screen_capture", false)
+        tryApply("screenCapture=${if (blockCapture) "blocked" else "allowed"}${modeNote(captureMode)}") {
+            if (!dpm.isDeviceOwnerApp(context.packageName)) throw SecurityException("requires Device Owner")
+            dpm.setScreenCaptureDisabled(admin, blockCapture)
+        }
+
+        // Wi-Fi SSID allowlist — corporate networks only. This is the one rule in
+        // the set whose enforceability depends on the OS version:
+        //  - Android 13+ (API 33): setWifiSsidPolicy() takes a real allowlist and
+        //    the platform refuses every SSID outside it.
+        //  - Android 10-12: there is NO allowlist API. The nearest restriction,
+        //    DISALLOW_CONFIG_WIFI, is all-or-nothing — it would stop the user
+        //    configuring ANY network, including the corporate ones this rule is
+        //    trying to permit, so it cannot express the policy. Applying a blunt
+        //    substitute and calling it enforcement would be a lie, so the rule is
+        //    reported as unenforceable on that handset and stays monitor-only:
+        //    the breach detector still reads the connected SSID and reports it,
+        //    which is exactly why monitor mode exists in POLICY_SCHEMA.
+        val wifiMode = ruleMode(policy, "wifi_ssid_allowlist")
+        val wifiAllowlist = stringList(policy, "wifi_ssid_allowlist")
+        when {
+            // Nothing to enforce — the rule is watched/off, or the allowlist is
+            // empty, which means "any network". Either way, clear an allowlist a
+            // previous 'enforce' policy latched into the platform, but only where
+            // one could exist at all (API 33+ and Device Owner), so an ordinary
+            // handset does not report a failure for a call that never needed
+            // making. Note "no restriction" is spelled as a null policy, not an
+            // empty allowlist (see applyWifiSsidAllowlist).
+            wifiMode != MODE_ENFORCE || wifiAllowlist.isEmpty() -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && isDeviceOwner()) {
+                    tryApply("wifiAllowlist=unrestricted${modeNote(wifiMode)}") {
+                        applyWifiSsidAllowlist(emptyList())
+                    }
+                }
+            }
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ->
+                unenforceable.append(
+                    "wifiAllowlist[${wifiAllowlist.size} SSID(s); needs Android 13+, device runs " +
+                        "${Build.VERSION.RELEASE} — monitor-only here] ",
+                )
+            else -> tryApply("wifiAllowlist[${wifiAllowlist.size}]") {
+                applyWifiSsidAllowlist(wifiAllowlist)
+            }
+        }
+
+        // --- Kiosk / lock task (OPT-IN) ---------------------------------------
+        // Kept outside tryApply on purpose: applyKiosk() reports its outcome as a
+        // sentence, the way setLocationEnabled() and reboot() do, and squeezing
+        // that into a one-word "applied" label would throw away the honest part
+        // (what got pinned, whether the power menu is really suppressed).
+        val kioskNote = when {
+            policy.optBoolean("kiosk_mode", false) -> applyKiosk(
+                enabled = true,
+                packages = stringList(policy, "kiosk_packages"),
+                allowPowerMenu = policy.optBoolean("kiosk_allow_power_menu", false),
+            )
+            // kiosk_mode is off. Touch lock-task ONLY if this device is actually in
+            // it, so an ordinary employee phone's policy never goes near these APIs
+            // — while a device whose policy just turned kiosk off is genuinely
+            // released instead of staying pinned to yesterday's app list forever.
+            isKioskActive() -> applyKiosk(enabled = false, packages = emptyList(), allowPowerMenu = true)
+            else -> null
+        }
+
         val result = StringBuilder()
         if (applied.isNotEmpty()) result.append("applied: ${applied.toString().trim()}")
         if (restricted.isNotEmpty()) {
             if (result.isNotEmpty()) result.append(" | ")
             result.append("requires Device Owner: ${restricted.toString().trim()}")
         }
+        if (unenforceable.isNotEmpty()) {
+            if (result.isNotEmpty()) result.append(" | ")
+            result.append("cannot be enforced on this Android version: ${unenforceable.toString().trim()}")
+        }
+        if (kioskNote != null) {
+            if (result.isNotEmpty()) result.append(" | ")
+            result.append(kioskNote)
+        }
         return result.toString().ifEmpty { "no policy changes" }
+    }
+
+    /**
+     * Add or clear one user restriction, Device Owner–gated.
+     *
+     * The throw is the point: it hands applyPolicy()'s tryApply() a failure to
+     * record instead of letting a plain Device Admin sail through a call the OS
+     * was never going to honour. Same idiom as grantLocationPermissions() and
+     * enforceOwnership().
+     */
+    private fun applyRestriction(restriction: String, on: Boolean) {
+        if (!dpm.isDeviceOwnerApp(context.packageName)) throw SecurityException("requires Device Owner")
+        if (on) dpm.addUserRestriction(admin, restriction) else dpm.clearUserRestriction(admin, restriction)
+    }
+
+    /** "(monitor)"/"(off)" so a policy result says WHY a rule is not blocking. */
+    private fun modeNote(mode: String): String = if (mode == MODE_ENFORCE) "" else "($mode)"
+
+    /**
+     * Read a JSON string array out of a policy document, dropping blanks. The
+     * server sends [] for "unset", and a hand-edited policy can carry stray
+     * whitespace entries — both have to mean "no entries" rather than an SSID or
+     * a package name made of spaces, which would either be rejected by the
+     * platform or, worse, quietly accepted as a rule nobody can satisfy.
+     */
+    private fun stringList(policy: JSONObject, key: String): List<String> {
+        val arr = policy.optJSONArray(key) ?: return emptyList()
+        val out = ArrayList<String>(arr.length())
+        for (i in 0 until arr.length()) {
+            val value = arr.optString(i, "").trim()
+            if (value.isNotEmpty()) out.add(value)
+        }
+        return out
+    }
+
+    /**
+     * Hard-enforce the corporate Wi-Fi allowlist. Android 13 (API 33) and up only
+     * — setWifiSsidPolicy is the sole API that can express "these SSIDs and no
+     * others", and it simply does not exist below that, which is why the caller
+     * reports the rule as unenforceable rather than substituting something
+     * blunter. The version check lives here so no caller can reach the API 33
+     * classes on an older handset.
+     *
+     * Two details worth spelling out:
+     *  - The call takes no ComponentName. API 33 resolves the caller's Device
+     *    Owner status from the calling package itself, so the admin component
+     *    every other call in this class passes is not part of this signature.
+     *  - An empty allowlist means "no restriction", which the platform spells as
+     *    a null policy. Passing an empty set instead would be rejected — and read
+     *    as "no network is permitted", the exact opposite of what the policy says.
+     *
+     * SSIDs travel over the air as raw bytes rather than text, so WifiSsid.fromBytes
+     * takes the UTF-8 encoding of the name the operator typed into the console.
+     */
+    private fun applyWifiSsidAllowlist(ssids: List<String>) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            throw UnsupportedOperationException("requires Android 13+")
+        }
+        if (!dpm.isDeviceOwnerApp(context.packageName)) throw SecurityException("requires Device Owner")
+        if (ssids.isEmpty()) {
+            dpm.setWifiSsidPolicy(null)
+            return
+        }
+        val allowed = ssids.map { android.net.wifi.WifiSsid.fromBytes(it.toByteArray(Charsets.UTF_8)) }.toSet()
+        // The shipped SDK exposes no createAllowlistPolicy() factory: the public
+        // constructor with WIFI_SSID_POLICY_TYPE_ALLOWLIST is the allowlist form.
+        dpm.setWifiSsidPolicy(
+            android.app.admin.WifiSsidPolicy(
+                android.app.admin.WifiSsidPolicy.WIFI_SSID_POLICY_TYPE_ALLOWLIST,
+                allowed,
+            ),
+        )
+    }
+
+    /** Whether a lock-task allowlist is currently installed on this device. */
+    private fun isKioskActive(): Boolean = runCatching {
+        dpm.isDeviceOwnerApp(context.packageName) && dpm.getLockTaskPackages(admin).isNotEmpty()
+    }.getOrDefault(false)
+
+    /**
+     * OPT-IN kiosk (lock task) mode: pin the device to an approved set of apps.
+     *
+     * Only reached when a policy explicitly sets kiosk_mode — lock task takes the
+     * launcher away, so switching it on for an ordinary employee phone would
+     * cripple the device rather than secure it. It suits a dedicated handset (POS,
+     * scanner, signage), which is why POLICY_SCHEMA keeps it off by default.
+     *
+     * What each call actually does, so nobody reads more into the result string
+     * than is there:
+     *  - setLockTaskPackages AUTHORISES those packages for lock task. The device
+     *    enters the pinned state when one of them calls startLockTask() (or is
+     *    launched into it); the allowlist alone does not pin anything. The agent's
+     *    own package is always included — leaving it out would authorise a kiosk
+     *    the management agent itself is locked out of.
+     *  - setLockTaskFeatures decides what the system UI still offers while pinned.
+     *    It is API 28+; the app's floor is API 29, so it is always available here.
+     *    HOME is mandatory for a usable multi-app kiosk and the platform also
+     *    REQUIRES it alongside NOTIFICATIONS/OVERVIEW (it throws otherwise).
+     *    KEYGUARD stays on: without it lock task suppresses the lock screen
+     *    entirely, which would quietly void the password policy applied a few
+     *    lines above in the same document.
+     *  - Omitting LOCK_TASK_FEATURE_GLOBAL_ACTIONS is the only supported way to
+     *    suppress the power/global-actions dialog. Be clear about the ceiling: a
+     *    long-press (or power+volume) still forces a firmware-level shutdown that
+     *    no Android API can intercept. This stops casual power-offs, not a
+     *    determined one.
+     *
+     * Device Owner only; a plain Device Admin is told so rather than told nothing.
+     */
+    fun applyKiosk(enabled: Boolean, packages: List<String>, allowPowerMenu: Boolean): String {
+        if (!dpm.isDeviceOwnerApp(context.packageName)) {
+            return "kiosk unchanged: requires Device Owner (this device is Device Admin only)"
+        }
+        return try {
+            if (!enabled) {
+                // An empty allowlist genuinely releases the device: nothing is
+                // permitted to enter lock task, and anything currently pinned is
+                // let out by the platform.
+                dpm.setLockTaskPackages(admin, emptyArray())
+                // Put the platform default (the power/global-actions dialog) back,
+                // or a device released from kiosk keeps a suppressed power menu
+                // with no kiosk left to explain it.
+                val restored = runCatching {
+                    dpm.setLockTaskFeatures(admin, DevicePolicyManager.LOCK_TASK_FEATURE_GLOBAL_ACTIONS)
+                }.isSuccess
+                return if (restored) {
+                    "kiosk off — lock-task allowlist cleared, device released, power menu restored"
+                } else {
+                    "kiosk off — lock-task allowlist cleared, device released (lock-task features left unchanged)"
+                }
+            }
+            val allowlist = (packages + context.packageName)
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+            dpm.setLockTaskPackages(admin, allowlist.toTypedArray())
+            var features = DevicePolicyManager.LOCK_TASK_FEATURE_HOME or
+                DevicePolicyManager.LOCK_TASK_FEATURE_NOTIFICATIONS or
+                DevicePolicyManager.LOCK_TASK_FEATURE_SYSTEM_INFO or
+                DevicePolicyManager.LOCK_TASK_FEATURE_KEYGUARD
+            if (allowPowerMenu) {
+                features = features or DevicePolicyManager.LOCK_TASK_FEATURE_GLOBAL_ACTIONS
+            }
+            dpm.setLockTaskFeatures(admin, features)
+            "kiosk on — ${allowlist.size} app(s) allowed in lock task (agent included), power menu " +
+                (if (allowPowerMenu) "available" else "suppressed while pinned; a long-press power-off is firmware-level and cannot be blocked") +
+                "; the device pins itself once an allowed app enters lock task"
+        } catch (e: Exception) {
+            "kiosk unchanged: ${e.message?.take(60)}"
+        }
     }
 
     /**
@@ -475,5 +786,36 @@ class PolicyManager(private val context: Context) {
         if (!isAdminActive()) return "failed: device admin not active"
         dpm.setCameraDisabled(admin, disabled)
         return if (disabled) "camera disabled" else "camera enabled"
+    }
+
+    companion object {
+        /** The device physically blocks the behaviour (default, block-first). */
+        const val MODE_ENFORCE = "enforce"
+
+        /** The device allows the behaviour but the breach detector reports it. */
+        const val MODE_MONITOR = "monitor"
+
+        /** Neither applied nor watched. */
+        const val MODE_OFF = "off"
+
+        /**
+         * The enforcement mode for a single rule, mirroring ruleMode() in the
+         * server's services/policyEngine.js so both ends of the wire read the
+         * same policy the same way.
+         *
+         * Anything missing or unrecognised falls back to 'enforce': that is the
+         * server's own default, it keeps a policy stored before rule_modes existed
+         * behaving exactly as it did, and a typo in a hand-edited policy fails
+         * closed (the rule keeps blocking) rather than silently opening the device
+         * up. optString already returns the fallback for a non-string value, so a
+         * mode written as a number or an object lands here too.
+         */
+        fun ruleMode(policy: JSONObject, rule: String): String {
+            val modes = policy.optJSONObject("rule_modes") ?: return MODE_ENFORCE
+            return when (val mode = modes.optString(rule, MODE_ENFORCE)) {
+                MODE_ENFORCE, MODE_MONITOR, MODE_OFF -> mode
+                else -> MODE_ENFORCE
+            }
+        }
     }
 }

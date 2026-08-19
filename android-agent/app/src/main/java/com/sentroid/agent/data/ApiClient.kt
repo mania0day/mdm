@@ -95,6 +95,32 @@ class ApiClient(private val baseUrl: String, private val deviceToken: String? = 
         post("/api/agent/tamper", body, auth = true, connectTimeoutMs = 4000, readTimeoutMs = 4000)
     }
 
+    /**
+     * Report policy breaches this device OBSERVED but did not block.
+     *
+     * This is the device half of 'monitor' mode. A monitored rule is deliberately
+     * left un-blocked on the handset, so the breach leaves no trace in the OS, the
+     * compliance verdict, or anywhere else — these rows are the only record it
+     * ever happened. The same path carries breaches of rules set to 'enforce' that
+     * this device is too old, or not Device Owner enough, to actually block.
+     *
+     * Each entry is {rule, mode, detail, metadata, occurred_at}; occurred_at is the
+     * device clock at DETECTION, which is why it is sent at all — a phone that was
+     * offline for an hour must report when the breach happened, not when it finally
+     * managed to phone home (the server keeps its own created_at for that).
+     *
+     * The server accepts at most 50 violations per request and rejects the whole
+     * batch above that, which is why ViolationMonitor caps its queue to match.
+     * Throws like every other call here, so the caller can requeue the batch
+     * instead of silently losing the evidence.
+     */
+    fun reportViolations(violations: List<JSONObject>) {
+        if (violations.isEmpty()) return
+        val arr = JSONArray()
+        for (v in violations) arr.put(v)
+        post("/api/agent/violations", JSONObject().put("violations", arr), auth = true)
+    }
+
     /** Sync a dino-runner score; the server keeps only the best one seen. */
     fun submitGameScore(score: Int) {
         post("/api/agent/game-score", JSONObject().put("score", score), auth = true)

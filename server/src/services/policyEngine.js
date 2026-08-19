@@ -65,6 +65,21 @@ export const POLICY_SCHEMA = {
   disallow_debugging: false,
   disable_screen_capture: false,
 
+  // --- Kiosk / lock-task (OPT-IN, never part of a general phone policy) -----
+  // Off by default and deliberately absent from the seeded base policy: turning
+  // this on pins the device to the listed apps and takes away the launcher, so
+  // it suits a dedicated single-purpose handset (POS, scanner, signage) and
+  // would cripple an ordinary employee phone. Only a policy that explicitly sets
+  // kiosk_mode true gets it.
+  //
+  // It is also the ONLY supported way to suppress the power menu: lock-task mode
+  // hides the global-actions dialog unless LOCK_TASK_FEATURE_GLOBAL_ACTIONS is
+  // requested. Even then a long-press still forces a firmware-level shutdown, so
+  // this reduces casual power-offs rather than preventing them.
+  kiosk_mode: false,
+  kiosk_packages: [], // packages allowed in lock-task; agent is always included
+  kiosk_allow_power_menu: false, // false = suppress the power/global-actions dialog
+
   // --- Per-rule enforcement mode -------------------------------------------
   // The core of the design: every controllable rule is either
   //   'enforce' - the device physically prevents it (default, block-first), or

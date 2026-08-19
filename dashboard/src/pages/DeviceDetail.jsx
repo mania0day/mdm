@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, Cell } from 'recharts';
 import { api } from '../api';
 import { useAuth, hasRole } from '../auth.jsx';
-import { Spinner, StatusBadge, ComplianceBadge, OnlineDot, SeverityBadge, timeAgo, notifyAlertsChanged } from '../ui.jsx';
+import { Spinner, StatusBadge, ComplianceBadge, OnlineDot, SeverityBadge, timeAgo, EmptyState, notifyAlertsChanged } from '../ui.jsx';
 import LocationMap from '../components/LocationMap.jsx';
 
 // Spaced well apart in hue (not all clustered in red-orange) so the three
@@ -80,6 +80,103 @@ const OWNER_ONLY_POLICY_KEYS = new Set([
   'force_airplane_mode_off',
 ]);
 
+// Human-readable names for the rules the agent can report a breach of. The raw
+// snake_case key is what the policy engine and the handset speak; an operator
+// scanning this list should not have to. Anything missing here (a rule added
+// server-side that this map has not caught up with) falls back to the
+// de-underscored key rather than being hidden.
+const VIOLATION_RULE_LABELS = {
+  block_outgoing_calls: 'Outgoing calls',
+  wifi_ssid_allowlist: 'Wi-Fi network allowlist',
+  block_new_app_installs: 'App installs',
+  block_unknown_sources: 'Unknown-source installs',
+  disallow_usb_transfer: 'USB file transfer',
+  disallow_debugging: 'USB / ADB debugging',
+  disable_screen_capture: 'Screen capture',
+  disable_camera: 'Camera',
+  disable_mic: 'Microphone',
+  force_airplane_mode_off: 'Airplane mode',
+  kiosk_mode: 'Kiosk lock-task',
+};
+
+// How each mode reads to an operator — the distinction is the entire point of
+// this list, so it lives in the label and the sentence under it, never in the
+// colour alone:
+//  - 'monitor' is the system working as designed. The handset deliberately did
+//    NOT block the action; this row is the only trace the breach ever left.
+//  - 'enforce' is a stronger signal. The rule was meant to be blocked and the
+//    device reported it instead, which means the API was not available to it
+//    (most of these are Android-version gated — Wi-Fi SSID allowlisting needs
+//    13+, for example). The control is not actually in place on that handset.
+const VIOLATION_MODES = {
+  monitor: {
+    label: 'Monitored',
+    badge: 'bg-brand-100 text-brand-700 ring-1 ring-brand-600/20 dark:bg-brand-500/15 dark:text-brand-300 dark:ring-brand-400/25',
+    note: 'Allowed by design — the device reported it instead of blocking it.',
+  },
+  enforce: {
+    label: 'Not blocked',
+    badge: 'bg-orange-100 text-orange-700 ring-1 ring-orange-600/20 dark:bg-orange-500/15 dark:text-orange-300 dark:ring-orange-400/25',
+    note: 'Set to enforce, but this handset could not block it — the control is not in place here.',
+  },
+  off: {
+    label: 'Rule off',
+    badge: 'bg-slate-100 text-slate-600 ring-1 ring-slate-400/20 dark:bg-slate-700/50 dark:text-slate-300 dark:ring-slate-500/25',
+    note: 'The rule was switched off at the time — kept for the record only.',
+  },
+};
+
+// Friendlier names for the metadata the agent attaches to a breach. The payload
+// is free-form JSON, so unknown keys are still rendered (de-underscored) — an
+// unrecognised field is evidence too and must not be swallowed.
+const VIOLATION_METADATA_LABELS = {
+  ssid: 'SSID',
+  bssid: 'BSSID',
+  package: 'Package',
+  package_name: 'Package',
+  app_label: 'App',
+  number: 'Number',
+  phone_number: 'Number',
+  api_level: 'API level',
+  required_api: 'Needs API',
+  reason: 'Reason',
+  count: 'Count',
+};
+
+// The Alerts card above shows the 8 most recent; violations follow suit rather
+// than dumping the server's 200-row cap on the page by default.
+const VIOLATION_PREVIEW_COUNT = 8;
+
+function violationRuleLabel(rule) {
+  return VIOLATION_RULE_LABELS[rule] || String(rule || 'unknown rule').replace(/_/g, ' ');
+}
+
+function violationMetaLabel(key) {
+  return VIOLATION_METADATA_LABELS[key] || key.replace(/_/g, ' ');
+}
+
+function violationMetaValue(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  if (Array.isArray(value)) return value.join(', ');
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+/**
+ * When a violation actually happened. occurred_at is the device's own clock at
+ * the moment of the breach and is what we want: a phone that was offline for an
+ * hour uploads late, and dating the row by the upload would misreport it. Falls
+ * back to the server's receipt time when the agent sent no timestamp — parsed
+ * the same way timeAgo() does, since SQLite hands back "YYYY-MM-DD HH:MM:SS"
+ * (UTC, no zone marker) while the agent sends ISO.
+ */
+function violationDate(v) {
+  const ts = v.occurred_at || v.created_at;
+  if (!ts) return null;
+  const d = new Date(ts.includes('T') ? ts : ts + 'Z');
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 // Staggered reveal for the main sections.
 const container = {
   hidden: {},
@@ -109,12 +206,18 @@ export default function DeviceDetail() {
   const [policies, setPolicies] = useState([]);
   const [alerts, setAlerts] = useState(null);
   const [enrollmentHistory, setEnrollmentHistory] = useState(null);
+  const [violations, setViolations] = useState(null);
+  const [showAllViolations, setShowAllViolations] = useState(false);
   const [busy, setBusy] = useState('');
   const [toast, setToast] = useState('');
 
   const load = useCallback(() => {
     api.get(`/devices/${id}`).then(setData).catch(() => navigate('/devices'));
     api.get(`/alerts?device_id=${id}`).then((d) => setAlerts(d.alerts)).catch(() => {});
+    // Policy breaches this device reported. Rides the same 6s poll as the rest
+    // of the page — a monitored rule is never blocked on the handset, so a new
+    // row here is the first and only sign the operator gets that it happened.
+    api.get(`/devices/${id}/violations`).then((d) => setViolations(d.violations)).catch(() => {});
     // Enroll/unenroll/re-enroll timeline — device stays on record through all
     // of these (unenroll is soft), so this always has the full story.
     api
@@ -136,6 +239,15 @@ export default function DeviceDetail() {
     api.post(`/alerts/ack-all?device_id=${id}`).then(notifyAlertsChanged).catch(() => {});
   }, [id]);
 
+  // Drop the previous device's violations the moment the route changes. This
+  // list is evidence about one specific handset — showing device A's breaches
+  // under device B's name for the fraction of a second before the new fetch
+  // lands would be worse than showing the loading state.
+  useEffect(() => {
+    setViolations(null);
+    setShowAllViolations(false);
+  }, [id]);
+
   if (!data) return <Spinner />;
   const { device, policy, commands, cve } = data;
   const cveChartData = cve
@@ -145,6 +257,20 @@ export default function DeviceDetail() {
         { name: 'Medium', value: cve.medium_count, color: CVE_SEVERITY_COLORS.Medium },
       ]
     : [];
+
+  // Newest first by the same timestamp the row displays (the device's own clock
+  // where it sent one), so the ordering can never disagree with the labels next
+  // to it; id descending breaks ties from a batched upload.
+  const violationRows = violations
+    ? [...violations].sort(
+        (a, b) => (violationDate(b)?.getTime() || 0) - (violationDate(a)?.getTime() || 0) || b.id - a.id,
+      )
+    : null;
+  const shownViolations = showAllViolations ? violationRows : violationRows?.slice(0, VIOLATION_PREVIEW_COUNT);
+  // Breaches of a rule that was supposed to block — i.e. controls this handset
+  // is not actually applying. Called out separately because it is the number
+  // that warrants action, not the raw total.
+  const unblockedCount = violationRows?.filter((v) => v.mode === 'enforce').length || 0;
 
   async function sendCommand(cmd) {
     if (cmd.confirm && !confirm(`Confirm "${cmd.label}" on ${device.name}? This is a sensitive action.`)) return;
@@ -409,6 +535,107 @@ export default function DeviceDetail() {
             </dl>
           </motion.div>
         </div>
+
+        {/* Policy violations — what this device actually DID against its policy.
+            Separate from Alerts on purpose: an alert is a notification that gets
+            acknowledged and cleared, this is the durable record of the breach. */}
+        <motion.div variants={item} className="card">
+          <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-800">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <h2 className="font-display font-semibold text-slate-900 dark:text-slate-100">Policy Violations</h2>
+              {violationRows?.length > 0 && (
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                  {violationRows.length} recorded · {unblockedCount} not blocked
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1.5 max-w-3xl">
+              A <strong className="font-semibold text-slate-700 dark:text-slate-200">monitored</strong> rule is
+              deliberately not blocked on the handset — the device allows the action and reports it, so these rows are
+              the only record it ever happened. A rule marked{' '}
+              <strong className="font-semibold text-slate-700 dark:text-slate-200">not blocked</strong> is set to
+              enforce but the device could not apply it (usually an API its Android version does not have): that
+              control is not in place on this handset and needs attention.
+            </p>
+          </div>
+          {!violationRows ? (
+            <Spinner />
+          ) : violationRows.length ? (
+            <>
+              <ol className="divide-y divide-slate-100 dark:divide-slate-800">
+                {shownViolations.map((v) => {
+                  const mode = VIOLATION_MODES[v.mode] || {
+                    ...VIOLATION_MODES.off,
+                    label: v.mode ? String(v.mode) : 'unknown mode',
+                    note: 'The agent reported a mode this console does not recognise.',
+                  };
+                  const when = violationDate(v);
+                  return (
+                    <li key={v.id} className="px-5 py-3.5 flex items-start gap-3">
+                      <SeverityBadge severity={v.severity} />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                            {violationRuleLabel(v.rule)}
+                          </span>
+                          <span className={`badge ${mode.badge}`}>{mode.label}</span>
+                        </div>
+                        <p className="text-sm text-slate-700 dark:text-slate-200 mt-0.5">
+                          {v.detail || `${violationRuleLabel(v.rule)} breached`}
+                        </p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{mode.note}</p>
+                        {v.metadata && Object.keys(v.metadata).length > 0 && (
+                          <dl className="mt-1.5 flex flex-wrap gap-1.5">
+                            {Object.entries(v.metadata).map(([k, val]) => (
+                              <div
+                                key={k}
+                                className="inline-flex items-baseline gap-1.5 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 px-2 py-0.5"
+                              >
+                                <dt className="text-[11px] uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                                  {violationMetaLabel(k)}
+                                </dt>
+                                <dd className="text-xs font-mono text-slate-700 dark:text-slate-200 break-all">
+                                  {violationMetaValue(val)}
+                                </dd>
+                              </div>
+                            ))}
+                          </dl>
+                        )}
+                      </div>
+                      {when ? (
+                        <time
+                          dateTime={when.toISOString()}
+                          title={`${v.occurred_at ? 'Device clock' : 'Recorded by server'}: ${when.toLocaleString()}`}
+                          className="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap shrink-0"
+                        >
+                          {timeAgo(v.occurred_at || v.created_at)}
+                        </time>
+                      ) : (
+                        <span className="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap shrink-0">
+                          time unknown
+                        </span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ol>
+              {violationRows.length > VIOLATION_PREVIEW_COUNT && (
+                <div className="px-5 py-3 border-t border-slate-100 dark:border-slate-800">
+                  <button
+                    onClick={() => setShowAllViolations((s) => !s)}
+                    className="text-xs text-brand-700 dark:text-brand-300 hover:text-brand-800"
+                  >
+                    {showAllViolations
+                      ? `Show only the latest ${VIOLATION_PREVIEW_COUNT}`
+                      : `Show all ${violationRows.length} violations →`}
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
+            <EmptyState>No policy violations recorded</EmptyState>
+          )}
+        </motion.div>
 
         {/* CVE exposure — high/critical unpatched vulnerability graph for this device */}
         {cve && (
