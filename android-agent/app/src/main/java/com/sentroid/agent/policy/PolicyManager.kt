@@ -99,6 +99,18 @@ class PolicyManager(private val context: Context) {
         // first. Folding them together would send an operator chasing a fix that
         // cannot exist on that device.
         val unenforceable = StringBuilder()
+        // A fourth bucket, for the case where the handset IS provisioned correctly
+        // and the platform refused the VALUE rather than the caller (an SSID whose
+        // UTF-8 form is not 1-32 bytes is the realistic one). Re-provisioning the
+        // device fixes nothing here — editing the policy in the console does — so
+        // it must never be reported as a Device Owner problem.
+        val rejected = StringBuilder()
+        // A fifth bucket, for rules switched to 'monitor' that this agent has no
+        // detector for. They really are unblocked below, but nothing records the
+        // breach, so an empty Violations tab would read as "nobody did this" when
+        // it means "nobody was looking". Naming the gap is the only honest option:
+        // silently keeping the rule enforced would be the opposite lie.
+        val undetectable = StringBuilder()
 
         // Each restriction is applied independently: several DevicePolicyManager
         // controls (password quality, camera, screen-timeout) require Device Owner
@@ -117,6 +129,19 @@ class PolicyManager(private val context: Context) {
             }
         }
 
+        // The other half of 'monitor' — the half this agent cannot always deliver.
+        // Unblocking is only half the contract; the breach still has to be
+        // reported, and ViolationMonitor implements a detector for the rules in
+        // DETECTED_RULES and no others. For anything else 'monitor' means
+        // unblocked AND unrecorded, so the rule is named in `undetectable` instead
+        // of being left to read as coverage. Only worth saying when the rule is
+        // actually switched on: 'monitor' on a rule set to false asks for nothing.
+        fun noteWatchGap(label: String, rule: String, mode: String) {
+            if (mode == MODE_MONITOR && rule !in DETECTED_RULES && policy.optBoolean(rule, false)) {
+                undetectable.append("$label ")
+            }
+        }
+
         // One boolean user-restriction rule, applied under its per-rule mode.
         //
         // The mode is what decides whether the OS blocks: only 'enforce' can turn
@@ -130,6 +155,7 @@ class PolicyManager(private val context: Context) {
         fun tryRestriction(label: String, rule: String, restriction: String) {
             val mode = ruleMode(policy, rule)
             val block = mode == MODE_ENFORCE && policy.optBoolean(rule, false)
+            noteWatchGap(label, rule, mode)
             tryApply("$label=${if (block) "blocked" else "allowed"}${modeNote(mode)}") {
                 applyRestriction(restriction, block)
             }
@@ -177,6 +203,7 @@ class PolicyManager(private val context: Context) {
         // the console promised it was merely being watched.
         val camMode = ruleMode(policy, "disable_camera")
         val disableCam = camMode == MODE_ENFORCE && policy.optBoolean("disable_camera", false)
+        noteWatchGap("camera", "disable_camera", camMode)
         tryApply("camera=${if (disableCam) "disabled" else "enabled"}${modeNote(camMode)}") {
             dpm.setCameraDisabled(admin, disableCam)
         }
@@ -187,6 +214,7 @@ class PolicyManager(private val context: Context) {
         // Owner can set. A plain Device Admin throws here, same as the others.
         val micMode = ruleMode(policy, "disable_mic")
         val disableMic = micMode == MODE_ENFORCE && policy.optBoolean("disable_mic", false)
+        noteWatchGap("mic", "disable_mic", micMode)
         tryApply("mic=${if (disableMic) "disabled" else "enabled"}${modeNote(micMode)}") {
             if (!dpm.isDeviceOwnerApp(context.packageName)) throw SecurityException("requires Device Owner")
             if (disableMic) {
@@ -230,6 +258,7 @@ class PolicyManager(private val context: Context) {
         val airplaneMode = ruleMode(policy, "force_airplane_mode_off")
         val blockAirplane =
             airplaneMode == MODE_ENFORCE && policy.optBoolean("force_airplane_mode_off", false)
+        noteWatchGap("airplane", "force_airplane_mode_off", airplaneMode)
         tryApply("airplane=${if (blockAirplane) "blocked-off" else "user-controlled"}${modeNote(airplaneMode)}") {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && dpm.isDeviceOwnerApp(context.packageName)) {
                 if (blockAirplane) {
@@ -298,10 +327,20 @@ class PolicyManager(private val context: Context) {
         //    blocking, since that is a separate switch in the same policy.
         // We set both, so there is no gap on any of Android 10-16. The global
         // variant landed exactly at our API floor (29), so it needs no guard.
+        //
+        // Reported as two labels, not one: the calls are independent, so an OEM
+        // that honours one and throws on the other would otherwise put the whole
+        // rule in a single bucket and describe a device state that isn't real —
+        // "unknownSources=blocked" filed as unapplied while the per-user
+        // restriction is in fact set, or vice versa on the clear path.
         val unknownMode = ruleMode(policy, "block_unknown_sources")
         val blockUnknown = unknownMode == MODE_ENFORCE && policy.optBoolean("block_unknown_sources", false)
-        tryApply("unknownSources=${if (blockUnknown) "blocked" else "allowed"}${modeNote(unknownMode)}") {
+        val unknownState = "${if (blockUnknown) "blocked" else "allowed"}${modeNote(unknownMode)}"
+        noteWatchGap("unknownSources", "block_unknown_sources", unknownMode)
+        tryApply("unknownSources=$unknownState") {
             applyRestriction(android.os.UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES, blockUnknown)
+        }
+        tryApply("unknownSourcesGlobal=$unknownState") {
             applyRestriction(android.os.UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES_GLOBALLY, blockUnknown)
         }
 
@@ -323,6 +362,7 @@ class PolicyManager(private val context: Context) {
         // with a second phone. No MDM can, and this one does not claim to.
         val captureMode = ruleMode(policy, "disable_screen_capture")
         val blockCapture = captureMode == MODE_ENFORCE && policy.optBoolean("disable_screen_capture", false)
+        noteWatchGap("screenCapture", "disable_screen_capture", captureMode)
         tryApply("screenCapture=${if (blockCapture) "blocked" else "allowed"}${modeNote(captureMode)}") {
             if (!dpm.isDeviceOwnerApp(context.packageName)) throw SecurityException("requires Device Owner")
             dpm.setScreenCaptureDisabled(admin, blockCapture)
@@ -362,8 +402,25 @@ class PolicyManager(private val context: Context) {
                     "wifiAllowlist[${wifiAllowlist.size} SSID(s); needs Android 13+, device runs " +
                         "${Build.VERSION.RELEASE} — monitor-only here] ",
                 )
-            else -> tryApply("wifiAllowlist[${wifiAllowlist.size}]") {
-                applyWifiSsidAllowlist(wifiAllowlist)
+            // Deliberately NOT routed through tryApply(): its catch files every
+            // exception under "requires Device Owner", and on an Android 13+
+            // Device Owner — the only handset that reaches this branch — the
+            // realistic failure is a bad value, not bad provisioning. Telling an
+            // operator to re-enroll a correctly provisioned phone when the fix is
+            // to correct one SSID in the console is exactly the conflation the
+            // `unenforceable` bucket exists to prevent.
+            else -> {
+                val label = "wifiAllowlist[${wifiAllowlist.size}]"
+                try {
+                    applyWifiSsidAllowlist(wifiAllowlist)
+                    applied.append("$label ")
+                } catch (e: SecurityException) {
+                    android.util.Log.w("SentroidPolicy", "'$label' requires Device Owner", e)
+                    restricted.append("$label ")
+                } catch (e: Exception) {
+                    android.util.Log.w("SentroidPolicy", "'$label' rejected by the platform", e)
+                    rejected.append("$label: ${e.message?.take(80)} ")
+                }
             }
         }
 
@@ -396,6 +453,17 @@ class PolicyManager(private val context: Context) {
             if (result.isNotEmpty()) result.append(" | ")
             result.append("cannot be enforced on this Android version: ${unenforceable.toString().trim()}")
         }
+        if (rejected.isNotEmpty()) {
+            if (result.isNotEmpty()) result.append(" | ")
+            result.append("rejected by the device — fix the policy: ${rejected.toString().trim()}")
+        }
+        if (undetectable.isNotEmpty()) {
+            if (result.isNotEmpty()) result.append(" | ")
+            result.append(
+                "monitor requested but this agent has no detector — unblocked and unwatched: " +
+                    undetectable.toString().trim(),
+            )
+        }
         if (kioskNote != null) {
             if (result.isNotEmpty()) result.append(" | ")
             result.append(kioskNote)
@@ -420,17 +488,22 @@ class PolicyManager(private val context: Context) {
     private fun modeNote(mode: String): String = if (mode == MODE_ENFORCE) "" else "($mode)"
 
     /**
-     * Read a JSON string array out of a policy document, dropping blanks. The
-     * server sends [] for "unset", and a hand-edited policy can carry stray
-     * whitespace entries — both have to mean "no entries" rather than an SSID or
-     * a package name made of spaces, which would either be rejected by the
-     * platform or, worse, quietly accepted as a rule nobody can satisfy.
+     * Read a JSON string array out of a policy document, dropping blanks and
+     * anything that is not a string. The server sends [] for "unset", and a
+     * hand-edited policy can carry stray whitespace entries — both have to mean
+     * "no entries" rather than an SSID or a package name made of spaces, which
+     * would either be rejected by the platform or, worse, quietly accepted as a
+     * rule nobody can satisfy.
      */
     private fun stringList(policy: JSONObject, key: String): List<String> {
         val arr = policy.optJSONArray(key) ?: return emptyList()
         val out = ArrayList<String>(arr.length())
         for (i in 0 until arr.length()) {
-            val value = arr.optString(i, "").trim()
+            // opt(), not optString(): Android's optString runs a JSON null through
+            // String.valueOf and hands back the literal "null" instead of the
+            // fallback, which would become a phantom SSID (hard-enforced on
+            // Android 13+) or a bogus package authorised for lock task.
+            val value = (arr.opt(i) as? String)?.trim() ?: continue
             if (value.isNotEmpty()) out.add(value)
         }
         return out
@@ -464,7 +537,16 @@ class PolicyManager(private val context: Context) {
             dpm.setWifiSsidPolicy(null)
             return
         }
-        val allowed = ssids.map { android.net.wifi.WifiSsid.fromBytes(it.toByteArray(Charsets.UTF_8)) }.toSet()
+        val allowed = ssids.map { ssid ->
+            val bytes = ssid.toByteArray(Charsets.UTF_8)
+            // Checked here so the failure names the offending entry: WifiSsid.fromBytes
+            // throws a bare IllegalArgumentException for anything outside 1-32 bytes,
+            // which tells an operator nothing about WHICH SSID to correct.
+            require(bytes.size in 1..32) {
+                "SSID \"$ssid\" is ${bytes.size} bytes; Wi-Fi names must be 1-32 bytes"
+            }
+            android.net.wifi.WifiSsid.fromBytes(bytes)
+        }.toSet()
         // The shipped SDK exposes no createAllowlistPolicy() factory: the public
         // constructor with WIFI_SSID_POLICY_TYPE_ALLOWLIST is the allowlist form.
         dpm.setWifiSsidPolicy(
@@ -544,11 +626,27 @@ class PolicyManager(private val context: Context) {
             if (allowPowerMenu) {
                 features = features or DevicePolicyManager.LOCK_TASK_FEATURE_GLOBAL_ACTIONS
             }
-            dpm.setLockTaskFeatures(admin, features)
-            "kiosk on — ${allowlist.size} app(s) allowed in lock task (agent included), power menu " +
-                (if (allowPowerMenu) "available" else "suppressed while pinned; a long-press power-off is firmware-level and cannot be blocked") +
-                "; the device pins itself once an allowed app enters lock task"
+            // The allowlist is already committed at this point, so a failure here
+            // leaves a PARTIALLY applied kiosk — the packages authorised, the
+            // lock-task features at whatever they were before (the platform
+            // default includes GLOBAL_ACTIONS, i.e. the power menu this policy may
+            // have asked to suppress). OEMs do reject feature combinations, so
+            // that outcome gets its own sentence: letting it fall to the catch
+            // below would report "kiosk unchanged" over a device that changed.
+            val featureError = runCatching { dpm.setLockTaskFeatures(admin, features) }.exceptionOrNull()
+            val head = "kiosk on — ${allowlist.size} app(s) allowed in lock task (agent included)"
+            val tail = "; the device pins itself once an allowed app enters lock task"
+            if (featureError == null) {
+                head + ", power menu " +
+                    (if (allowPowerMenu) "available" else "suppressed while pinned; a long-press power-off is firmware-level and cannot be blocked") +
+                    tail
+            } else {
+                head + ", but lock-task features could not be set (${featureError.message?.take(60)}) — " +
+                    "the power menu stays at its previous setting" + tail
+            }
         } catch (e: Exception) {
+            // Reserved for a setLockTaskPackages failure: nothing was authorised,
+            // so the device really is unchanged.
             "kiosk unchanged: ${e.message?.take(60)}"
         }
     }
@@ -797,6 +895,21 @@ class PolicyManager(private val context: Context) {
 
         /** Neither applied nor watched. */
         const val MODE_OFF = "off"
+
+        /**
+         * The rules ViolationMonitor actually has a detector for — the two signals
+         * Android exposes to a non-system app (call state, connected SSID).
+         *
+         * 'monitor' is a two-part promise: the device stops blocking AND reports
+         * every breach. applyPolicy keeps the first half for every rule, but only
+         * these two get the second, so it names the rest in its own result bucket.
+         * Taken from ViolationMonitor's own constants so adding a detector there
+         * cannot leave this list quietly claiming less (or more) than is watched.
+         */
+        private val DETECTED_RULES = setOf(
+            ViolationMonitor.RULE_OUTGOING_CALLS,
+            ViolationMonitor.RULE_WIFI_ALLOWLIST,
+        )
 
         /**
          * The enforcement mode for a single rule, mirroring ruleMode() in the

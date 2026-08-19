@@ -120,7 +120,27 @@ object ViolationMonitor {
 
     // --- Wi-Fi detector state -------------------------------------------------
     @Volatile private var wifiCallback: ConnectivityManager.NetworkCallback? = null
-    @Volatile private var liveSsid: String? = null
+
+    /**
+     * The SSID of each Wi-Fi Network the callback has reported, keyed by Network
+     * rather than held in one global slot.
+     *
+     * Several networks can carry TRANSPORT_WIFI at the same time and only one of
+     * them is the network the user joined: a local-only hotspot, a soft AP and a
+     * tethering upstream all match the transport, and their transportInfo is not a
+     * WifiInfo at all. With a single slot, any callback for one of those would
+     * overwrite the real SSID with null and its onLost would clear a still-valid
+     * one — a silent missed detection on the ONLY reliable read path for Android
+     * 12+, where the synchronous getNetworkCapabilities() SSID is redacted.
+     *
+     * Insertion-ordered and re-inserted on every update, so the newest entry is
+     * last and liveSsid resolves to the most recently reported network.
+     */
+    private val liveSsids = LinkedHashMap<Network, String>()
+
+    /** Most recent callback-supplied SSID, or null if no Wi-Fi network reported one. */
+    private val liveSsid: String?
+        get() = synchronized(liveSsids) { liveSsids.values.lastOrNull() }
     // Dedupe state for the Wi-Fi rule (see checkWifiAllowlist).
     @Volatile private var reportedSsid: String? = null
     @Volatile private var reportedSsidAt = 0L
@@ -208,7 +228,15 @@ object ViolationMonitor {
         val arr: JSONArray = policy.optJSONArray(key) ?: return emptyList()
         val out = ArrayList<String>(arr.length())
         for (i in 0 until arr.length()) {
-            arr.optString(i)?.trim()?.takeIf { it.isNotBlank() }?.let { out.add(it) }
+            // opt(), not optString() — kept deliberately identical to
+            // PolicyManager.stringList(). Android's optString turns a JSON null
+            // into the literal "null", and the two halves of the same rule must
+            // read the same allowlist: if enforcement saw ["CorpWiFi"] while the
+            // detector saw ["CorpWiFi", "null"], the pair would disagree about
+            // which networks are approved and the mismatch would surface as
+            // phantom violations nobody can explain.
+            val value = (arr.opt(i) as? String)?.trim() ?: continue
+            if (value.isNotEmpty()) out.add(value)
         }
         return out
     }
@@ -314,15 +342,28 @@ object ViolationMonitor {
         }
     }
 
+    /**
+     * Unregister the call-state listener.
+     *
+     * The listener references are read INSIDE the main-thread block, not on the
+     * calling thread, because arming and disarming come from different threads:
+     * startCallWatch runs on the check-in thread and only assigns the reference
+     * from its own posted block, while stop() arrives from onDestroy on the main
+     * thread. Reading here would capture nulls for a registration still sitting in
+     * the queue, unregister nothing, and leave that listener alive for the rest of
+     * the process — with callWatchArmed already false, so the next check-in would
+     * register a second one on top of it. Deferring the read (and runOnMain's
+     * unconditional post) puts both halves in request order on one thread.
+     */
     private fun stopCallWatch(ctx: Context) {
         if (!callWatchArmed) return
         callWatchArmed = false
-        val cbS = callsCallbackS
-        val legacy = callsListenerLegacy
-        callsCallbackS = null
-        callsListenerLegacy = null
         val tm = ctx.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager ?: return
         runOnMain {
+            val cbS = callsCallbackS
+            val legacy = callsListenerLegacy
+            callsCallbackS = null
+            callsListenerLegacy = null
             runCatching {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && cbS is TelephonyCallback) {
                     tm.unregisterTelephonyCallback(cbS)
@@ -385,13 +426,23 @@ object ViolationMonitor {
         val mode = callsWatchMode ?: return
 
         val blockable = callsBlockable
+        // The enforced case is genuinely ambiguous and must not be reported as a
+        // flat enforcement failure. Android permits emergency numbers through
+        // DISALLOW_OUTGOING_CALLS by design, so on a device where the restriction
+        // IS applied an emergency call is the likelier explanation of an OFFHOOK —
+        // and the dialled number is withheld from any app without READ_CALL_LOG,
+        // so nothing at this layer can tell the two apart. The flag lets the
+        // console badge the row instead of the agent guessing.
+        val possibleEmergency = blockable && mode == PolicyManager.MODE_ENFORCE
         val detail = when {
             mode == PolicyManager.MODE_MONITOR ->
                 "Outgoing call placed. Policy monitors outgoing calls on this device, " +
                     "so the call was recorded but not blocked."
             blockable ->
-                "Outgoing call placed even though policy enforces a block on outgoing calls — " +
-                    "the DISALLOW_OUTGOING_CALLS restriction did not stop it."
+                "Outgoing call placed while DISALLOW_OUTGOING_CALLS is enforced. This is either an " +
+                    "emergency call — which Android always permits regardless of policy — or an " +
+                    "enforcement failure; the dialled number is unavailable without READ_CALL_LOG, " +
+                    "which the agent does not request, so the two cannot be told apart here."
             else ->
                 "Outgoing call placed. Policy blocks outgoing calls, but this device is not " +
                     "Device Owner, so DISALLOW_OUTGOING_CALLS cannot be applied — the call could " +
@@ -406,6 +457,16 @@ object ViolationMonitor {
                     .put("detected_via", "call_state_idle_to_offhook")
                     .put("sdk_int", Build.VERSION.SDK_INT)
                     .put("enforceable", blockable)
+                    // Attached ONLY when the ambiguity is real — i.e. the call
+                    // got through on a device that should have blocked it, where
+                    // an emergency call (which Android permits regardless of
+                    // policy) is a genuine explanation. Emitting it as false
+                    // elsewhere would render in the console as an "emergency:
+                    // ruled out" chip, and the agent cannot rule that out: it
+                    // never sees the dialled number (READ_CALL_LOG is not
+                    // requested). Absent therefore means "not applicable", never
+                    // "checked and negative".
+                    .apply { if (possibleEmergency) put("possible_emergency", true) }
                     // Stated explicitly so nobody reads the absence of a number as
                     // a failed lookup: Android 10+ withholds it from any app
                     // without READ_CALL_LOG, which the agent does not request.
@@ -479,7 +540,17 @@ object ViolationMonitor {
             mode == PolicyManager.MODE_MONITOR ->
                 detail.append(" This rule is in monitor mode, so the connection was recorded but not blocked.")
             blockable ->
-                detail.append(" The SSID allowlist is enforced on this device, so this connection should not have been possible.")
+                // `blockable` only says this handset is CAPABLE of enforcing
+                // (Android 13+ and Device Owner) — not that the allowlist was
+                // successfully applied, which the detector cannot see from here.
+                // Naming both possibilities keeps the operator looking in the
+                // right place instead of trusting a control that may never have
+                // been installed.
+                detail.append(
+                    " This device supports SSID allowlist enforcement (Android 13+ and Device Owner), " +
+                        "so either the allowlist was not applied successfully or enforcement did not hold — " +
+                        "the agent cannot tell which from here. Check the last policy result for this device.",
+                )
             else ->
                 detail.append(
                     " Enforcement is impossible on this device: an SSID allowlist requires Android 13+ " +
@@ -558,8 +629,10 @@ object ViolationMonitor {
             if (ssid == null) {
                 logOnce(
                     "wifi-unknown-ssid",
-                    "connected to Wi-Fi but the SSID is unreadable — needs ACCESS_WIFI_STATE, " +
-                        "fine + background location and the OS location toggle ON; reporting nothing",
+                    "connected to Wi-Fi but the SSID is unreadable — either the read was withheld " +
+                        "(needs ACCESS_WIFI_STATE, fine + background location and the OS location " +
+                        "toggle ON) or the network's name is not valid UTF-8, which cannot be matched " +
+                        "against a plain-text allowlist; reporting nothing",
                 )
             }
             ssid
@@ -573,11 +646,28 @@ object ViolationMonitor {
         }
     }
 
-    /** Strip WifiManager's surrounding quotes and reject the "unknown" sentinels. */
+    /**
+     * Strip WifiManager's surrounding quotes and reject the "unknown" sentinels.
+     *
+     * WifiInfo.getSSID() returns a valid-UTF-8 name wrapped in double quotes, and
+     * an SSID that is NOT valid UTF-8 as a bare hex string — the WHOLE string
+     * ("0x746573745f73736964"), never just the marker, which is why the prefix is
+     * matched and not the literal "0x". The hex form is treated as unreadable
+     * rather than as a name: it can never match a plain-text allowlist entry, so
+     * reporting it verbatim would turn every non-UTF-8 network into a permanent
+     * violation whose SSID an operator cannot read — the same reason an unknown
+     * SSID is never turned into a breach (see checkWifiAllowlist).
+     *
+     * The quoting is what separates the two forms, so it is tested before the
+     * quotes are stripped: a network genuinely named 0xC0FFEE arrives quoted and
+     * survives.
+     */
     private fun normalizeSsid(raw: String?): String? {
-        val s = raw?.trim()?.removeSurrounding("\"")?.trim() ?: return null
-        // "0x..." is the hex form Android uses for an SSID that isn't valid UTF-8.
-        if (s.isBlank() || s == UNKNOWN_SSID || s == "0x") return null
+        val trimmed = raw?.trim() ?: return null
+        val quoted = trimmed.length >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")
+        val s = trimmed.removeSurrounding("\"").trim()
+        if (s.isBlank() || s == UNKNOWN_SSID) return null
+        if (!quoted && s.startsWith("0x")) return null
         return s
     }
 
@@ -596,11 +686,18 @@ object ViolationMonitor {
             ) {
                 override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                     if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return
-                    liveSsid = normalizeSsid((caps.transportInfo as? WifiInfo)?.ssid)
+                    // Only THIS network's entry is touched. A network whose
+                    // transportInfo is not a WifiInfo (hotspot/tethering) drops its
+                    // own entry and leaves the joined network's SSID intact.
+                    val ssid = normalizeSsid((caps.transportInfo as? WifiInfo)?.ssid)
+                    synchronized(liveSsids) {
+                        liveSsids.remove(network)
+                        if (ssid != null) liveSsids[network] = ssid
+                    }
                 }
 
                 override fun onLost(network: Network) {
-                    liveSsid = null
+                    synchronized(liveSsids) { liveSsids.remove(network) }
                 }
             }
             // No INTERNET capability is requested on purpose: a captive-portal
@@ -620,7 +717,7 @@ object ViolationMonitor {
     private fun stopWifiWatch(ctx: Context) {
         val cb = wifiCallback ?: return
         wifiCallback = null
-        liveSsid = null
+        synchronized(liveSsids) { liveSsids.clear() }
         runCatching {
             (ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager)
                 ?.unregisterNetworkCallback(cb)
@@ -672,10 +769,15 @@ object ViolationMonitor {
      * PhoneStateListener must be built on a thread with a Looper, and telephony
      * (un)registration is cheap, so both are pinned to the main thread — check-ins
      * run on a bare background thread.
+     *
+     * Always POSTED, even when the caller is already on the main thread. Running
+     * inline would let a disarm requested from the main thread (onDestroy) jump
+     * ahead of an arm posted earlier from the check-in thread and still queued,
+     * which is exactly the ordering that leaks a listener (see stopCallWatch).
+     * Posting keeps arm and disarm in the order they were asked for.
      */
     private fun runOnMain(block: () -> Unit) {
-        if (Looper.myLooper() == Looper.getMainLooper()) block()
-        else Handler(Looper.getMainLooper()).post(block)
+        Handler(Looper.getMainLooper()).post(block)
     }
 
     /**

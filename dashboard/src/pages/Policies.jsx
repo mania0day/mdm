@@ -72,10 +72,33 @@ const MODE_BADGE = {
 };
 
 /**
+ * Copy for the two kinds of row that have no mode selector. A mode-less rule is
+ * NOT automatically an enforced one: require_encryption and block_rooted are
+ * never pushed to the handset at all (nothing in the agent reads either key),
+ * they are evaluated server-side in evaluateCompliance() from what the device
+ * reports at check-in. Labelling those two "baseline — applied wherever the
+ * device supports it" would claim an enforcement action that never happens and
+ * deny the monitoring that does, so they carry their own marker.
+ */
+const BASELINE_MARKERS = {
+  applied: {
+    label: 'baseline',
+    title: 'A baseline setting: it is applied wherever the device supports it, and there is nothing to monitor separately.',
+  },
+  compliance: {
+    label: 'check only',
+    title:
+      'A compliance check, not a control: SENTROID cannot encrypt or un-root a handset. The device reports its state at each check-in and a breach is flagged as non-compliance — never blocked.',
+  },
+};
+
+/**
  * The editable fields, grouped the way an admin thinks about them rather than
  * in schema order. A field gets an ENFORCE/MONITOR/OFF selector purely because
  * its key appears in the schema's rule_modes — nothing here declares that, so a
  * rule the server adds later cannot end up in the form without its mode.
+ * `baseline` picks the marker for the rows that have no selector; it defaults
+ * to 'applied' and only the detection-only rules override it.
  */
 const SECTIONS = [
   {
@@ -83,7 +106,13 @@ const SECTIONS = [
     title: 'Password & Lock Screen',
     blurb: 'Screen-lock strength, and what happens after repeated failed unlocks.',
     fields: [
-      { key: 'require_password', label: 'Require screen-lock password', type: 'bool' },
+      {
+        key: 'require_password',
+        label: 'Require screen-lock password',
+        type: 'bool',
+        baseline: 'compliance',
+        hint: 'Checked, not pushed — the agent never reads this key. The device reports whether a screen lock is set and one without it is marked non-compliant; what the lock must look like comes from Password quality and Min password length below.',
+      },
       { key: 'password_quality', label: 'Password quality', type: 'select', options: ['none', 'numeric', 'alphanumeric', 'complex'] },
       { key: 'min_password_length', label: 'Min password length', type: 'number', min: 0 },
       {
@@ -173,8 +202,20 @@ const SECTIONS = [
         type: 'bool',
         hint: 'Blocks screenshots and screen recording device-wide. Device Owner only.',
       },
-      { key: 'require_encryption', label: 'Require storage encryption', type: 'bool' },
-      { key: 'block_rooted', label: 'Flag rooted devices', type: 'bool' },
+      {
+        key: 'require_encryption',
+        label: 'Require storage encryption',
+        type: 'bool',
+        baseline: 'compliance',
+        hint: 'Checked, never applied — Android gives an admin no way to encrypt a handset that is not already encrypted. A device reporting encryption off is marked non-compliant.',
+      },
+      {
+        key: 'block_rooted',
+        label: 'Flag rooted devices',
+        type: 'bool',
+        baseline: 'compliance',
+        hint: 'Marks a device non-compliant when its check-in reports root indicators. Detection only — the agent cannot un-root a handset.',
+      },
     ],
   },
   {
@@ -266,7 +307,12 @@ function ModeSelector({ rule, mode, onChange, disabled }) {
  */
 function StringListInput({ id, value, onChange, disabled, placeholder }) {
   const [draft, setDraft] = useState('');
-  const items = Array.isArray(value) ? value : [];
+  // Dedupe and drop non-strings on the way IN, not just on the way out: config
+  // is stored as z.record(z.any()) with no array validation, so a list written
+  // by the API, by hand or by an older build can hold duplicates. Two chips
+  // with the same value collide on the React key, and removal is by value —
+  // clicking one X would drop both entries at once.
+  const items = Array.isArray(value) ? [...new Set(value.filter((s) => typeof s === 'string'))] : [];
 
   function commit(raw) {
     const next = [...items];
@@ -373,6 +419,7 @@ function FieldControl({ id, field, value, onChange, disabled }) {
 function FieldRow({ field, value, onChange, mode, onModeChange, disabled }) {
   const id = `policy-${field.key}`;
   const isList = field.type === 'list';
+  const marker = BASELINE_MARKERS[field.baseline] || BASELINE_MARKERS.applied;
   return (
     <div className="py-3">
       <div className="flex items-start gap-3 flex-wrap">
@@ -395,11 +442,8 @@ function FieldRow({ field, value, onChange, mode, onModeChange, disabled }) {
             {mode ? (
               <ModeSelector rule={field.key} mode={mode} onChange={onModeChange} disabled={disabled} />
             ) : (
-              <span
-                className="text-xs text-slate-400 dark:text-slate-500"
-                title="A baseline setting: it is applied wherever the device supports it, and there is nothing to monitor separately."
-              >
-                baseline
+              <span className="text-xs text-slate-400 dark:text-slate-500" title={marker.title}>
+                {marker.label}
               </span>
             )}
           </div>
@@ -444,7 +488,16 @@ function PolicyEditor({ policy, schema, onSave, onClose, canEdit }) {
   const [config, setConfig] = useState(() => initialConfig(schema, policy));
   const [modes, setModes] = useState(() => initialModes(schema, policy));
   const [isDefault, setIsDefault] = useState(!!policy?.is_default);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  // Whether we can honestly claim the write never landed — true only for a 4xx,
+  // where the server rejected the request before touching anything.
+  const [saveRejected, setSaveRejected] = useState(false);
   const disabled = !canEdit;
+  // The fleet gets its policy from the one flagged default at enrollment
+  // (routes/agent.js), so the server refuses to leave zero defaults. Moving the
+  // flag is done by marking another policy default, not by clearing this one.
+  const isCurrentDefault = !!policy?.is_default;
 
   function set(k, v) {
     setConfig((c) => ({ ...c, [k]: v }));
@@ -454,7 +507,7 @@ function PolicyEditor({ policy, schema, onSave, onClose, canEdit }) {
   }
   function modeFor(key) {
     // Only keys the server tracks in rule_modes get a selector; everything else
-    // is a baseline setting with no monitor equivalent.
+    // is a fixed row, marked by BASELINE_MARKERS[field.baseline].
     return key in modes ? normalizeMode(modes[key]) : null;
   }
 
@@ -462,6 +515,31 @@ function PolicyEditor({ policy, schema, onSave, onClose, canEdit }) {
   // mode still belongs to the admin, so it gets a selector rather than being
   // quietly carried along.
   const unlaidRules = Object.keys(modes).filter((k) => !LAID_OUT_KEYS.has(k));
+
+  /**
+   * api.put/api.post throw on any non-2xx (a blank name, an expired token, a
+   * dropped connection). Without this the rejection went nowhere: the modal sat
+   * there looking saved while the fleet stayed on the old modes. A failed save
+   * has to say so — this editor is the only surface for enforce/monitor/off.
+   */
+  async function submit() {
+    setSaving(true);
+    setError('');
+    try {
+      await onSave({ name, description, config: { ...config, rule_modes: modes }, is_default: isDefault });
+      // No setSaving(false) on success: onSave closes the modal, so the button
+      // stays disabled for the rest of this component's life on purpose.
+    } catch (e) {
+      setError(e.message || 'Save failed');
+      // Whether the write landed is only knowable for a 4xx: the server
+      // rejected the request before applying it. A 5xx, a dropped connection,
+      // or an unparseable body can all happen AFTER the update committed, so
+      // claiming "nothing was changed" there would be a guess presented as
+      // fact — and an operator who believes it will not go and check.
+      setSaveRejected(typeof e.status === 'number' && e.status >= 400 && e.status < 500);
+      setSaving(false);
+    }
+  }
 
   return (
     <motion.div
@@ -522,9 +600,11 @@ function PolicyEditor({ policy, schema, onSave, onClose, canEdit }) {
               </li>
             </ul>
             <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
-              Rows marked <span className="font-medium">baseline</span> have no mode: they are applied wherever the
-              device supports it. Nearly every control here needs Device Owner — on a plain Device Admin the agent
-              reports back that it could not apply the rule rather than claiming success.
+              Rows with no mode are fixed one way or the other: <span className="font-medium">baseline</span> rules are
+              applied wherever the device supports it, while <span className="font-medium">check only</span> rules are
+              never pushed to the handset — the device reports its state and a breach is flagged as non-compliance.
+              Nearly every control here needs Device Owner — on a plain Device Admin the agent reports back that it
+              could not apply the rule rather than claiming success.
             </p>
           </div>
 
@@ -650,22 +730,44 @@ function PolicyEditor({ policy, schema, onSave, onClose, canEdit }) {
             </div>
           </section>
 
-          <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
-            <input type="checkbox" className="h-4 w-4 accent-brand-600" checked={isDefault} onChange={(e) => setIsDefault(e.target.checked)} disabled={disabled} />
-            Set as default policy for new devices
-          </label>
+          <div>
+            <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-brand-600"
+                checked={isDefault}
+                onChange={(e) => setIsDefault(e.target.checked)}
+                disabled={disabled || isCurrentDefault}
+              />
+              Set as default policy for new devices
+            </label>
+            {isCurrentDefault && (
+              <p className="text-xs text-slate-400 dark:text-slate-500 mt-1 max-w-prose">
+                This is the current default. It cannot simply be cleared — a device that enrols without an explicit
+                assignment gets the default policy, so the fleet always needs one. Mark another policy as default to
+                move the flag.
+              </p>
+            )}
+          </div>
         </div>
 
-        <div className="flex justify-end gap-2 px-6 py-4 border-t border-slate-100 dark:border-slate-800">
-          <button className="btn-ghost" onClick={onClose}>Close</button>
-          {canEdit && (
-            <button
-              className="btn-primary"
-              onClick={() => onSave({ name, description, config: { ...config, rule_modes: modes }, is_default: isDefault })}
-            >
-              Save
-            </button>
+        <div className="px-6 py-4 border-t border-slate-100 dark:border-slate-800">
+          {error && (
+            <div className="text-sm text-red-500 dark:text-red-400 mb-2">
+              Not saved — {error}.{' '}
+              {saveRejected
+                ? 'Nothing on the server was changed.'
+                : 'The server may or may not have applied this — reload and check before retrying.'}
+            </div>
           )}
+          <div className="flex justify-end gap-2">
+            <button className="btn-ghost" onClick={onClose}>Close</button>
+            {canEdit && (
+              <button className="btn-primary" onClick={submit} disabled={saving}>
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+            )}
+          </div>
         </div>
       </motion.div>
     </motion.div>
@@ -678,20 +780,27 @@ export default function Policies() {
   const [policies, setPolicies] = useState(null);
   const [schema, setSchema] = useState(FALLBACK_SCHEMA);
   const [editing, setEditing] = useState(null);
+  const [error, setError] = useState('');
 
   const load = () =>
     api
       .get('/policies')
       .then((d) => {
         setPolicies(d.policies);
+        setError('');
         // The server ships its POLICY_SCHEMA with the list; prefer it over the
         // local copy so a schema change on the server shows up here without a
         // dashboard rebuild.
         if (d.schema) setSchema(d.schema);
       })
-      .catch(() => {});
+      // A failed GET used to leave the page on a permanent spinner, which reads
+      // as "still loading" forever. Say the request failed instead.
+      .catch((e) => setError(e.message || 'Could not load policies'));
   useEffect(() => { load(); }, []);
 
+  // Deliberately does not catch: the rejection is what PolicyEditor shows in
+  // its footer. Swallowing it here would close the modal on a write that never
+  // reached the server.
   async function save(body) {
     if (editing?.id) await api.put(`/policies/${editing.id}`, body);
     else await api.post('/policies', body);
@@ -701,11 +810,30 @@ export default function Policies() {
 
   async function remove(p) {
     if (!confirm(`Delete policy "${p.name}"?`)) return;
-    await api.del(`/policies/${p.id}`);
-    load();
+    try {
+      await api.del(`/policies/${p.id}`);
+      load();
+    } catch (e) {
+      // e.g. the server's guard on deleting the default policy.
+      setError(e.message || 'Could not delete the policy');
+    }
   }
 
-  if (!policies) return <Spinner />;
+  if (!policies) {
+    return error ? (
+      <div className="card p-5">
+        <h1 className="font-display font-semibold text-slate-900 dark:text-slate-100">Security Policies</h1>
+        <p className="text-sm text-red-500 dark:text-red-400 mt-1">Could not load policies — {error}.</p>
+        <p className="text-xs text-slate-400 dark:text-slate-500 mt-1 max-w-prose">
+          The request failed; this is not a claim that no policies exist. What the devices are running cannot be read
+          from here until it succeeds.
+        </p>
+        <button className="btn-ghost mt-3" onClick={load}>Retry</button>
+      </div>
+    ) : (
+      <Spinner />
+    );
+  }
 
   return (
     <div className="space-y-5">
@@ -720,6 +848,8 @@ export default function Policies() {
           <button className="btn-primary" onClick={() => setEditing({})}>+ New Policy</button>
         )}
       </div>
+
+      {error && <div className="card p-3 text-sm text-red-500 dark:text-red-400">{error}</div>}
 
       <motion.div
         className="grid grid-cols-1 md:grid-cols-2 gap-4"

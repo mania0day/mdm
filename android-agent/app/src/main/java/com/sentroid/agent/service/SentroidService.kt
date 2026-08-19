@@ -298,7 +298,13 @@ class SentroidService : Service() {
         // not enforced on the handset, so this POST is the only record such a
         // breach ever happened; on failure the batch goes back on the queue and
         // the next check-in retries it, rather than the evidence being lost.
-        val watched = result.policy ?: prefs.lastPolicyJson?.let { JSONObject(it) }
+        // The cached copy is parsed defensively: a truncated or corrupt
+        // lastPolicyJson must not throw from here. This sits AFTER the check-in and
+        // applyPolicy but BEFORE the command loop below, so an unguarded JSONException
+        // would abort the cycle with the policy already applied, leave every queued
+        // command unexecuted, and repeat on every cycle for as long as the bad value
+        // is cached. ViolationMonitor.start() guards the same key the same way.
+        val watched = result.policy ?: prefs.lastPolicyJson?.let { runCatching { JSONObject(it) }.getOrNull() }
         if (watched != null) {
             val breaches = ViolationMonitor.collectViolations(watched)
             if (breaches.isNotEmpty()) {

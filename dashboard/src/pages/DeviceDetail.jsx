@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, Cell } from 'recharts';
@@ -70,6 +70,16 @@ const COMMAND_GROUPS = [
 // throws SecurityException for all of them (confirmed by the agent's own
 // ENFORCE_POLICY result string). Only max_failed_passwords and
 // max_screen_timeout_seconds work at the Device Admin level.
+//
+// This set must stay in sync with POLICY_SCHEMA in
+// server/src/services/policyEngine.js. The banner above the list tells the
+// operator that the items marked "owner only" are the ones NOT applied, so a
+// missing key is not a missing label — it is an affirmative claim that a Device
+// Admin handset is enforcing that rule. Add every new owner-gated key here at
+// the same time it is added to the schema.
+// (require_encryption and block_rooted are deliberately absent: they are
+// server-side compliance checks the agent never pushes to the handset at any
+// provisioning level, so "owner only" would be the wrong caveat for them.)
 const OWNER_ONLY_POLICY_KEYS = new Set([
   'min_password_length',
   'require_password',
@@ -78,6 +88,23 @@ const OWNER_ONLY_POLICY_KEYS = new Set([
   'disable_mic',
   'force_location_on',
   'force_airplane_mode_off',
+  // Availability lockdown — all addUserRestriction(), Device Owner only.
+  'disallow_safe_boot',
+  'disallow_factory_reset',
+  'disallow_add_user',
+  // Corporate controls — user restrictions, setScreenCaptureDisabled() and
+  // setWifiSsidPolicy(); every one throws for a plain Device Admin.
+  'block_outgoing_calls',
+  'wifi_ssid_allowlist',
+  'block_new_app_installs',
+  'block_unknown_sources',
+  'disallow_usb_transfer',
+  'disallow_debugging',
+  'disable_screen_capture',
+  // Kiosk / lock-task — setLockTaskPackages() and setLockTaskFeatures().
+  'kiosk_mode',
+  'kiosk_packages',
+  'kiosk_allow_power_menu',
 ]);
 
 // Human-readable names for the rules the agent can report a breach of. The raw
@@ -166,15 +193,39 @@ function violationMetaValue(value) {
  * When a violation actually happened. occurred_at is the device's own clock at
  * the moment of the breach and is what we want: a phone that was offline for an
  * hour uploads late, and dating the row by the upload would misreport it. Falls
- * back to the server's receipt time when the agent sent no timestamp — parsed
- * the same way timeAgo() does, since SQLite hands back "YYYY-MM-DD HH:MM:SS"
- * (UTC, no zone marker) while the agent sends ISO.
+ * back to the server's receipt time — parsed the same way timeAgo() does, since
+ * SQLite hands back "YYYY-MM-DD HH:MM:SS" (UTC, no zone marker) while the agent
+ * sends ISO.
+ *
+ * The fallback covers an occurred_at that is present but UNPARSEABLE, not just a
+ * missing one: the field is agent-supplied and the server only length-checks it,
+ * so a device clock formatted any other way ("2026-08-19 14:03:11 UTC", epoch
+ * millis) yields an Invalid Date. Treating that as "no timestamp at all" would
+ * both label the row "time unknown" and sort it to the bottom — pushing the
+ * newest evidence out of the preview — while a perfectly good server timestamp
+ * sat unused. Returns the source too, so the row can never caption a fallback
+ * as the device's own clock.
  */
 function violationDate(v) {
-  const ts = v.occurred_at || v.created_at;
-  if (!ts) return null;
-  const d = new Date(ts.includes('T') ? ts : ts + 'Z');
-  return Number.isNaN(d.getTime()) ? null : d;
+  for (const [source, ts] of [['device', v.occurred_at], ['server', v.created_at]]) {
+    if (typeof ts !== 'string' || !ts) continue;
+    const date = new Date(ts.includes('T') ? ts : ts + 'Z');
+    if (!Number.isNaN(date.getTime())) return { date, ts, source };
+  }
+  return null;
+}
+
+/**
+ * A policy value as an operator should read it. String(v) covers the booleans
+ * and numbers that make up most of the schema, but the list-valued keys
+ * (wifi_ssid_allowlist, kiosk_packages) need help: an empty array stringifies to
+ * an empty string, which on this card is indistinguishable from "not set" — and
+ * for an allowlist those mean opposite things, so an empty one says so in words.
+ */
+function policyValueText(v) {
+  if (Array.isArray(v)) return v.length ? v.join(', ') : 'none';
+  if (v === null || v === undefined || v === '') return '—';
+  return String(v);
 }
 
 // Staggered reveal for the main sections.
@@ -207,9 +258,16 @@ export default function DeviceDetail() {
   const [alerts, setAlerts] = useState(null);
   const [enrollmentHistory, setEnrollmentHistory] = useState(null);
   const [violations, setViolations] = useState(null);
+  const [violationsError, setViolationsError] = useState('');
   const [showAllViolations, setShowAllViolations] = useState(false);
   const [busy, setBusy] = useState('');
   const [toast, setToast] = useState('');
+  // The device this page is currently showing. React does NOT remount
+  // DeviceDetail when only the :id param changes, so a violations request fired
+  // for the previous device can still be in flight when the route moves on and
+  // would otherwise resolve into the new device's card. This is evidence about
+  // one specific handset, so the id is re-checked at resolution time.
+  const shownDeviceId = useRef(id);
 
   const load = useCallback(() => {
     api.get(`/devices/${id}`).then(setData).catch(() => navigate('/devices'));
@@ -217,7 +275,20 @@ export default function DeviceDetail() {
     // Policy breaches this device reported. Rides the same 6s poll as the rest
     // of the page — a monitored rule is never blocked on the handset, so a new
     // row here is the first and only sign the operator gets that it happened.
-    api.get(`/devices/${id}/violations`).then((d) => setViolations(d.violations)).catch(() => {});
+    // The failure is kept rather than swallowed: on this card an empty list is
+    // itself a claim ("nothing happened"), so a dead endpoint must not be
+    // allowed to look like one.
+    api
+      .get(`/devices/${id}/violations`)
+      .then((d) => {
+        if (shownDeviceId.current !== id) return;
+        setViolations(d.violations);
+        setViolationsError('');
+      })
+      .catch((e) => {
+        if (shownDeviceId.current !== id) return;
+        setViolationsError(e.message || 'request failed');
+      });
     // Enroll/unenroll/re-enroll timeline — device stays on record through all
     // of these (unenroll is soft), so this always has the full story.
     api
@@ -242,9 +313,13 @@ export default function DeviceDetail() {
   // Drop the previous device's violations the moment the route changes. This
   // list is evidence about one specific handset — showing device A's breaches
   // under device B's name for the fraction of a second before the new fetch
-  // lands would be worse than showing the loading state.
+  // lands would be worse than showing the loading state. Moving the ref here
+  // (rather than the load effect) is what makes an already-in-flight response
+  // for the old device get discarded instead of landing after this clear.
   useEffect(() => {
+    shownDeviceId.current = id;
     setViolations(null);
+    setViolationsError('');
     setShowAllViolations(false);
   }, [id]);
 
@@ -263,7 +338,7 @@ export default function DeviceDetail() {
   // to it; id descending breaks ties from a batched upload.
   const violationRows = violations
     ? [...violations].sort(
-        (a, b) => (violationDate(b)?.getTime() || 0) - (violationDate(a)?.getTime() || 0) || b.id - a.id,
+        (a, b) => (violationDate(b)?.date.getTime() || 0) - (violationDate(a)?.date.getTime() || 0) || b.id - a.id,
       )
     : null;
   const shownViolations = showAllViolations ? violationRows : violationRows?.slice(0, VIOLATION_PREVIEW_COUNT);
@@ -519,19 +594,55 @@ export default function DeviceDetail() {
               </p>
             )}
             <dl className="space-y-1.5 text-sm">
-              {Object.entries(policy.config).map(([k, v]) => (
-                <div key={k} className="flex justify-between items-center gap-2">
-                  <dt className="text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
-                    {k.replace(/_/g, ' ')}
-                    {device.management_mode !== 'device_owner' && OWNER_ONLY_POLICY_KEYS.has(k) && (
-                      <span className="text-[10px] uppercase tracking-wide text-amber-600 dark:text-amber-400 font-semibold">
-                        owner only
-                      </span>
-                    )}
-                  </dt>
-                  <dd className="text-slate-700 dark:text-slate-200 font-mono">{String(v)}</dd>
-                </div>
-              ))}
+              {Object.entries(policy.config).map(([k, v]) =>
+                // rule_modes gets its own block rather than a one-line value:
+                // it is a map, so the shared value cell would render it as
+                // "[object Object]" — and enforce/monitor/off per rule is the
+                // single most consequential thing on this card, since it is what
+                // decides whether the handset blocks a breach or merely reports
+                // one into the Violations list below.
+                k === 'rule_modes' && v && typeof v === 'object' && !Array.isArray(v) ? (
+                  <div key={k}>
+                    <dt className="text-slate-500 dark:text-slate-400">rule modes</dt>
+                    <dd className="mt-1">
+                      <ul className="space-y-1 border-l-2 border-slate-100 dark:border-slate-800 pl-3">
+                        {Object.entries(v).map(([rule, ruleMode]) => (
+                          <li key={rule} className="flex justify-between items-center gap-2">
+                            <span className="text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+                              {violationRuleLabel(rule)}
+                              {/* Same caveat the flat rows carry. Every rule in
+                                  rule_modes is Device-Owner-only, so on a Device
+                                  Admin handset an unmarked "enforce" would read
+                                  as a control that is in force when none of them
+                                  are — the omission itself makes a claim. */}
+                              {device.management_mode !== 'device_owner' && OWNER_ONLY_POLICY_KEYS.has(rule) && (
+                                <span className="text-[10px] uppercase tracking-wide text-amber-600 dark:text-amber-400 font-semibold">
+                                  owner only
+                                </span>
+                              )}
+                            </span>
+                            <span className="text-slate-700 dark:text-slate-200 font-mono">
+                              {policyValueText(ruleMode)}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </dd>
+                  </div>
+                ) : (
+                  <div key={k} className="flex justify-between items-center gap-2">
+                    <dt className="text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+                      {k.replace(/_/g, ' ')}
+                      {device.management_mode !== 'device_owner' && OWNER_ONLY_POLICY_KEYS.has(k) && (
+                        <span className="text-[10px] uppercase tracking-wide text-amber-600 dark:text-amber-400 font-semibold">
+                          owner only
+                        </span>
+                      )}
+                    </dt>
+                    <dd className="text-slate-700 dark:text-slate-200 font-mono">{policyValueText(v)}</dd>
+                  </div>
+                ),
+              )}
             </dl>
           </motion.div>
         </div>
@@ -558,8 +669,32 @@ export default function DeviceDetail() {
               control is not in place on this handset and needs attention.
             </p>
           </div>
+          {/* A failed fetch must never read as "no breaches". The empty state
+              below is a positive statement about this handset's behaviour, so
+              when the list could not be read at all we say that instead — in
+              words, not by leaving a spinner turning forever. */}
+          {violationsError && (
+            <p
+              role="alert"
+              className="px-5 py-3 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-500/10 border-b border-amber-200 dark:border-amber-500/20"
+            >
+              <strong className="font-semibold">Could not load violations</strong> — {violationsError}. This is a
+              failure to read the record, not a statement that there are none
+              {/* Keyed on whether a poll ever succeeded, not on the row count.
+                  With a successful-but-empty poll behind it, the old check
+                  dropped this clause and left the disclaimer sitting directly
+                  above "No policy violations recorded" — the two read as a
+                  contradiction, when in fact the empty result was real. */}
+              {violationRows
+                ? violationRows.length
+                  ? '; the rows below are from the last successful poll'
+                  : '; the last successful poll found none'
+                : ''}
+              .
+            </p>
+          )}
           {!violationRows ? (
-            <Spinner />
+            violationsError ? null : <Spinner />
           ) : violationRows.length ? (
             <>
               <ol className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -604,11 +739,11 @@ export default function DeviceDetail() {
                       </div>
                       {when ? (
                         <time
-                          dateTime={when.toISOString()}
-                          title={`${v.occurred_at ? 'Device clock' : 'Recorded by server'}: ${when.toLocaleString()}`}
+                          dateTime={when.date.toISOString()}
+                          title={`${when.source === 'device' ? 'Device clock' : 'Recorded by server'}: ${when.date.toLocaleString()}`}
                           className="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap shrink-0"
                         >
-                          {timeAgo(v.occurred_at || v.created_at)}
+                          {timeAgo(when.ts)}
                         </time>
                       ) : (
                         <span className="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap shrink-0">

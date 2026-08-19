@@ -41,19 +41,29 @@ policiesRouter.post(
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const body = policySchema.parse(req.body);
-    if (body.is_default) db.prepare('UPDATE policies SET is_default = 0').run();
-    const info = db
-      .prepare(
-        `INSERT INTO policies (name, description, config, is_default, created_by)
-         VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run(
-        body.name,
-        body.description,
-        JSON.stringify({ ...POLICY_SCHEMA, ...body.config }),
-        body.is_default ? 1 : 0,
-        req.user.id,
-      );
+    // Clearing the old default and inserting the new one must be atomic. Run
+    // apart, a failed INSERT (a UNIQUE name collision is the easy one to hit)
+    // leaves the fleet with the old default already cleared and no new one to
+    // replace it — zero default policies. Enrollment depends on there being one
+    // (routes/agent.js assigns getDefaultPolicyId at enroll time), so every
+    // device onboarded afterwards would come up with no policy at all, from
+    // nothing more than a rejected form submission.
+    const createPolicy = db.transaction(() => {
+      if (body.is_default) db.prepare('UPDATE policies SET is_default = 0').run();
+      return db
+        .prepare(
+          `INSERT INTO policies (name, description, config, is_default, created_by)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          body.name,
+          body.description,
+          JSON.stringify({ ...POLICY_SCHEMA, ...body.config }),
+          body.is_default ? 1 : 0,
+          req.user.id,
+        );
+    });
+    const info = createPolicy();
     audit({
       actorType: 'user',
       actorId: req.user.id,
@@ -75,7 +85,21 @@ policiesRouter.put(
     const existing = getStmt.get(req.params.id);
     if (!existing) throw httpError(404, 'Policy not found');
     const body = policySchema.partial().parse(req.body);
-    if (body.is_default) db.prepare('UPDATE policies SET is_default = 0').run();
+    // is_default is three-valued here: absent leaves the flag alone, true moves
+    // it to this policy, false asks to clear it. It used to be `body.is_default
+    // ? 1 : existing.is_default`, so unchecking the box in the console appeared
+    // to succeed and then silently came back checked. But a device that enrols
+    // without an explicit assignment falls back to the policy flagged default
+    // (routes/agent.js getDefaultPolicyId), so a fleet with zero defaults
+    // enrols handsets under no policy at all. Clearing is therefore refused
+    // outright — same invariant the delete guard below protects — and the flag
+    // is moved by marking another policy default.
+    if (body.is_default === false && existing.is_default) {
+      throw httpError(
+        400,
+        'Cannot clear the default policy — mark another policy as default instead; devices that enrol without an assignment need one.',
+      );
+    }
     const merged = {
       name: body.name ?? existing.name,
       description: body.description ?? existing.description,
@@ -84,11 +108,16 @@ policiesRouter.put(
         ...JSON.parse(existing.config || '{}'),
         ...(body.config || {}),
       }),
-      is_default: body.is_default ? 1 : existing.is_default,
+      is_default: body.is_default === true ? 1 : existing.is_default,
     };
-    db.prepare(
-      `UPDATE policies SET name=?, description=?, config=?, is_default=?, updated_at=datetime('now') WHERE id=?`,
-    ).run(merged.name, merged.description, merged.config, merged.is_default, existing.id);
+    // Clearing every default and re-flagging this policy is one step or none:
+    // a failure between the two would leave the fleet with no default at all.
+    db.transaction(() => {
+      if (body.is_default === true) db.prepare('UPDATE policies SET is_default = 0').run();
+      db.prepare(
+        `UPDATE policies SET name=?, description=?, config=?, is_default=?, updated_at=datetime('now') WHERE id=?`,
+      ).run(merged.name, merged.description, merged.config, merged.is_default, existing.id);
+    })();
     audit({
       actorType: 'user',
       actorId: req.user.id,
